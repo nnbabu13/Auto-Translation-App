@@ -204,6 +204,7 @@ export default function SessionScreen() {
   const utteranceChunkIndexRef = useRef(0);
   const lastSpeechEndTimeRef = useRef<number>(Date.now());
   const lastFlushTimeRef = useRef<number>(Date.now());
+  const lastFlushSpeechStartRef = useRef<number>(0);
   const speechDensityRef = useRef({ speechFrames: 0, totalFrames: 0 });
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const translationEndRef = useRef<HTMLDivElement>(null);
@@ -224,6 +225,8 @@ export default function SessionScreen() {
     confidence: number;
     chunkNumber: number;
     chunkRecord: any;
+    speechStartedAt: number;
+    receivedAt: number;
   }>>(new Map());
   const activeRequestsRef = useRef(0);
   const requestQueueRef = useRef<Array<{blob: Blob; chunkNumber: number; stats: AudioStats}>>([]);
@@ -233,6 +236,9 @@ export default function SessionScreen() {
   const [speechDensity, setSpeechDensity] = useState(0);
   const [skippedChunks, setSkippedChunks] = useState(0);
   const [currentPlaybackRate, setCurrentPlaybackRate] = useState(1.0);
+  const [chunkCreationDelay, setChunkCreationDelay] = useState(0);
+  const [playbackQueueDelay, setPlaybackQueueDelay] = useState(0);
+  const [endToEndLatency, setEndToEndLatency] = useState(0);
 
   const captureWarnings = useMemo(() => {
     const warnings: string[] = [];
@@ -559,6 +565,8 @@ export default function SessionScreen() {
           confidence: data.confidence,
           chunkNumber,
           chunkRecord,
+          speechStartedAt: lastFlushSpeechStartRef.current,
+          receivedAt: Date.now(),
         });
 
         updateRecordedChunk(chunkNumber, {
@@ -615,6 +623,11 @@ export default function SessionScreen() {
 
     pendingResultsRef.current.delete(nextSeq);
     nextExpectedSequenceRef.current++;
+
+    const now = Date.now();
+    setChunkCreationDelay(result.receivedAt - result.speechStartedAt);
+    setPlaybackQueueDelay(now - result.receivedAt);
+    setEndToEndLatency(now - result.speechStartedAt);
 
     setPreviousOriginalText(result.originalText);
     transcriptRef.current.push(result.originalText);
@@ -768,6 +781,7 @@ export default function SessionScreen() {
     };
 
     utteranceChunkIndexRef.current++;
+    lastFlushSpeechStartRef.current = utteranceStartTimeRef.current || Date.now();
     setAudioStats(stats);
     processChunkRef.current(wavBlob, utteranceChunkIndexRef.current, stats);
   }, []);
@@ -1609,6 +1623,23 @@ export default function SessionScreen() {
             <div>
               <p className="text-sm text-muted-foreground">Total Sequences</p>
               <p className="text-2xl font-bold text-blue-500">{sequenceCounterRef.current}</p>
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-4 mt-4">
+            <div className="rounded border border-border bg-sidebar/40 p-3">
+              <p className="text-xs text-muted-foreground uppercase">Chunk Creation Delay</p>
+              <p className="text-2xl font-bold text-yellow-500">{(chunkCreationDelay / 1000).toFixed(1)}s</p>
+              <p className="text-xs text-muted-foreground">Speech start → chunk ready</p>
+            </div>
+            <div className="rounded border border-border bg-sidebar/40 p-3">
+              <p className="text-xs text-muted-foreground uppercase">Playback Queue Delay</p>
+              <p className="text-2xl font-bold text-orange-500">{(playbackQueueDelay / 1000).toFixed(1)}s</p>
+              <p className="text-xs text-muted-foreground">API done → display</p>
+            </div>
+            <div className="rounded border border-border bg-sidebar/40 p-3">
+              <p className="text-xs text-muted-foreground uppercase">End-to-End Latency</p>
+              <p className="text-2xl font-bold text-red-500">{(endToEndLatency / 1000).toFixed(1)}s</p>
+              <p className="text-xs text-muted-foreground">Speech start → displayed</p>
             </div>
           </div>
           <div className="mt-6 space-y-3">
