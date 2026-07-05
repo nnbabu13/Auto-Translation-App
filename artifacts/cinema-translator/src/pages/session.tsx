@@ -119,6 +119,7 @@ export default function SessionScreen() {
   const [estimatedWaitMs, setEstimatedWaitMs] = useState(0);
   const [confidence, setConfidence] = useState(0);
   const [currentModel, setCurrentModel] = useState("gpt-4o");
+  const [sttModel, setSttModel] = useState("nova-3");
   const [recordedChunks, setRecordedChunks] = useState<RecordedChunk[]>([]);
   const [diarizationEnabled, setDiarizationEnabled] = useState(false);
   const [currentSpeaker, setCurrentSpeaker] = useState<string | null>(null);
@@ -417,6 +418,7 @@ export default function SessionScreen() {
             previousTranscripts: recentTranscripts,
             sourceLanguage: sourceLanguageSetting,
             model: currentModel,
+            sttModel: sttModel,
             benchmarkMode,
             cinemaMode,
             diarize: diarizationEnabled,
@@ -507,6 +509,7 @@ export default function SessionScreen() {
       sourceLanguageSetting,
       session,
       currentModel,
+      sttModel,
       benchmarkMode,
       playCapturedChunk,
       testMode,
@@ -911,6 +914,25 @@ export default function SessionScreen() {
                   >
                     <option value="gpt-4o-mini">gpt-4o-mini</option>
                     <option value="gpt-4o">gpt-4o</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm text-muted-foreground mb-2">
+                    Speech-to-Text Model
+                  </label>
+                  <select
+                    className="w-full bg-background border border-border rounded-md px-3 py-2 text-white"
+                    value={sttModel}
+                    onChange={(e) => setSttModel(e.target.value)}
+                  >
+                    <optgroup label="Deepgram">
+                      <option value="nova-3">Nova 3 (best accuracy)</option>
+                      <option value="nova-2">Nova 2 (fast)</option>
+                    </optgroup>
+                    <optgroup label="OpenAI">
+                      <option value="whisper-1">Whisper 1</option>
+                      <option value="gpt-4o-mini-transcribe">GPT-4o Mini Transcribe</option>
+                    </optgroup>
                   </select>
                 </div>
                 <div className="flex items-center justify-between">
@@ -1396,13 +1418,14 @@ export default function SessionScreen() {
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-lg text-white">
-                      Current Model
+                      Current Models
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <p className="text-xl font-bold text-purple-500">
-                      {currentModel}
-                    </p>
+                    <div className="space-y-1">
+                      <p className="text-sm text-muted-foreground">STT: <span className="text-cyan-500 font-bold">{sttModel}</span></p>
+                      <p className="text-sm text-muted-foreground">Translation: <span className="text-purple-500 font-bold">{currentModel}</span></p>
+                    </div>
                   </CardContent>
                 </Card>
                 <Card>

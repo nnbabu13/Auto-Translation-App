@@ -4,8 +4,6 @@ import { eq } from "drizzle-orm";
 
 const router: IRouter = Router();
 const MIN_CONFIDENCE = 0.3;
-const STT_MODEL = "gpt-4o-mini-transcribe";
-const DIARIZE_MODEL = "gpt-4o-transcribe-diarize";
 const HALLUCINATION_PHRASES = [
   "thank you for watching",
   "subscribe to our channel",
@@ -21,6 +19,20 @@ const MOVIE_DIALOGUE_TRANSCRIPTION_PROMPT = [
   "If there is no understandable speech, return an empty response.",
   "Ignore music, background sounds, applause, explosions and effects.",
 ].join(" ");
+
+const DEEPGRAM_MODELS = ["nova-3", "nova-2"] as const;
+const OPENAI_MODELS = ["whisper-1", "gpt-4o-mini-transcribe", "gpt-4o-transcribe-diarize"] as const;
+
+type DeepgramModel = (typeof DEEPGRAM_MODELS)[number];
+type OpenAIModel = (typeof OPENAI_MODELS)[number];
+
+function isDeepgramModel(model: string): model is DeepgramModel {
+  return (DEEPGRAM_MODELS as readonly string[]).includes(model);
+}
+
+function isOpenAIModel(model: string): model is OpenAIModel {
+  return (OPENAI_MODELS as readonly string[]).includes(model);
+}
 
 const LANGUAGE_NAMES: Record<string, string> = {
   Greek: "Greek",
@@ -73,6 +85,7 @@ router.post("/translate/chunk", async (req, res): Promise<void> => {
     sourceLanguage,
     benchmarkMode = false,
     model,
+    sttModel = "nova-3",
     cinemaMode = false,
     diarize = false,
   } = req.body;
@@ -84,7 +97,7 @@ router.post("/translate/chunk", async (req, res): Promise<void> => {
     return;
   }
 
-  if (!process.env.OPENAI_API_KEY) {
+  if (!process.env.OPENAI_API_KEY && !process.env.DEEPGRAM_API_KEY) {
     const mockLatencyMs = Date.now() - startTime;
     res.json({
       originalText: "Mock transcription",
@@ -97,28 +110,30 @@ router.post("/translate/chunk", async (req, res): Promise<void> => {
     return;
   }
 
-  const OpenAI = (await import("openai")).default;
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
   const audioBuffer = Buffer.from(audio, "base64");
   const ext = audioExt ?? "wav";
   const mimeType = ext === "wav" ? "audio/wav" : ext === "ogg" ? "audio/ogg" : "audio/webm";
 
-  let transcription: any;
-  let confidence = 0;
   let originalText = "";
+  let confidence = 0;
   let detectedLanguage = sourceLanguage;
   let speaker: string | null = null;
   let sttLatencyMs = 0;
   let translationLatencyMs = 0;
   let ttsLatencyMs = 0;
+  let usedSttModel = sttModel;
   const sttStartTime = Date.now();
 
-  if (process.env.DEEPGRAM_API_KEY) {
+  const useDeepgram = isDeepgramModel(sttModel) && process.env.DEEPGRAM_API_KEY;
+  const useOpenAI = isOpenAIModel(sttModel) && process.env.OPENAI_API_KEY;
+
+  if (useDeepgram) {
     try {
       const url = new URL("https://api.deepgram.com/v1/listen");
-      url.searchParams.append("model", "nova-3");
+      url.searchParams.append("model", sttModel);
       url.searchParams.append("smart_format", "true");
+      url.searchParams.append("punctuate", "true");
+      url.searchParams.append("paragraphs", "true");
       if (diarize) {
         url.searchParams.append("diarize", "true");
       }
@@ -148,24 +163,26 @@ router.post("/translate/chunk", async (req, res): Promise<void> => {
           speaker = `Speaker ${alternative.paragraphs.paragraphs[0].speaker}`;
         }
 
-        console.log(`Deepgram transcription success. Text: "${originalText}", Language: ${detectedLanguage}, Speaker: ${speaker}`);
+        console.log(`Deepgram (${sttModel}) success. Text: "${originalText}", Lang: ${detectedLanguage}, Speaker: ${speaker}`);
       } else {
         const errorText = await dgResponse.text();
-        console.error("Deepgram transcription API error:", dgResponse.status, errorText);
-        throw new Error(`Deepgram failed: ${dgResponse.status} - ${errorText}`);
+        console.error(`Deepgram ${sttModel} error:`, dgResponse.status, errorText);
       }
     } catch (dgErr) {
-      console.warn("Deepgram STT failed, falling back to OpenAI Whisper:", dgErr);
+      console.warn(`Deepgram ${sttModel} failed:`, dgErr);
     }
   }
 
-  if (!originalText) {
+  if (!originalText && useOpenAI) {
     try {
-      const useDiarizeModel = diarize && process.env.OPENAI_API_KEY;
+      const OpenAI = (await import("openai")).default;
+      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+      const useDiarizeModel = diarize && sttModel !== "whisper-1";
       const transcriptionOptions: any = {
         file: new File([audioBuffer], `audio.${ext}`, { type: mimeType }),
-        model: useDiarizeModel ? DIARIZE_MODEL : STT_MODEL,
-        response_format: useDiarizeModel ? "verbose_json" : "json",
+        model: useDiarizeModel ? "gpt-4o-transcribe-diarize" : sttModel,
+        response_format: "json",
         prompt: MOVIE_DIALOGUE_TRANSCRIPTION_PROMPT,
       };
       if (sourceLanguage && sourceLanguage !== "auto") {
@@ -173,40 +190,26 @@ router.post("/translate/chunk", async (req, res): Promise<void> => {
       }
 
       try {
-        transcription = await openai.audio.transcriptions.create(transcriptionOptions);
+        const transcription = await openai.audio.transcriptions.create(transcriptionOptions);
+        originalText = (transcription as any).text?.trim() ?? "";
+        detectedLanguage = (transcription as any).language ?? sourceLanguage;
+        usedSttModel = useDiarizeModel ? "gpt-4o-transcribe-diarize" : sttModel;
       } catch (err: any) {
-        if (err?.status === 400 && (err?.code === 'unsupported_language' || String(err).toLowerCase().includes("language"))) {
-          console.warn(`Language code '${sourceLanguage}' not supported. Retrying with auto-detection.`);
+        if (err?.status === 400 && String(err).toLowerCase().includes("language")) {
+          console.warn(`Language '${sourceLanguage}' not supported. Retrying with auto-detection.`);
           delete transcriptionOptions.language;
-          transcription = await openai.audio.transcriptions.create(transcriptionOptions);
+          const transcription = await openai.audio.transcriptions.create(transcriptionOptions);
+          originalText = (transcription as any).text?.trim() ?? "";
+          detectedLanguage = (transcription as any).language ?? sourceLanguage;
         } else {
           throw err;
         }
       }
 
-      const segments = transcription?.segments;
-      if (Array.isArray(segments) && segments.length > 0) {
-        confidence = segments.reduce((sum: number, seg: any) => sum + (seg?.confidence || 0.9), 0) / segments.length;
-
-        if (diarize && segments[0]?.speaker !== undefined) {
-          speaker = `Speaker ${segments[0].speaker}`;
-        }
-      } else {
-        confidence = 0.9;
-      }
-      originalText = (transcription as any).text?.trim() ?? "";
-      detectedLanguage = (transcription as any).language ?? sourceLanguage;
+      confidence = 0.9;
+      console.log(`OpenAI (${usedSttModel}) success. Text: "${originalText}", Lang: ${detectedLanguage}`);
     } catch (err) {
-      console.error("STT error:", err);
-      res.json({
-        originalText: "",
-        translatedText: "",
-        sourceLanguage: detectedLanguage,
-        audioBase64: "",
-        latencyMs: Date.now() - startTime,
-        confidence: 0,
-      });
-      return;
+      console.error("OpenAI STT error:", err);
     }
   }
 
@@ -217,6 +220,7 @@ router.post("/translate/chunk", async (req, res): Promise<void> => {
       sourceLanguage: detectedLanguage,
       audioBase64: "",
       latencyMs: Date.now() - startTime,
+      sttModel: usedSttModel,
       confidence: 0,
     });
     return;
@@ -230,6 +234,7 @@ router.post("/translate/chunk", async (req, res): Promise<void> => {
       sourceLanguage: detectedLanguage,
       audioBase64: "",
       latencyMs: Date.now() - startTime,
+      sttModel: usedSttModel,
       confidence,
     });
     return;
@@ -243,6 +248,7 @@ router.post("/translate/chunk", async (req, res): Promise<void> => {
       sourceLanguage: detectedLanguage,
       audioBase64: "",
       latencyMs: Date.now() - startTime,
+      sttModel: usedSttModel,
       confidence,
     });
     return;
@@ -250,6 +256,9 @@ router.post("/translate/chunk", async (req, res): Promise<void> => {
 
   sttLatencyMs = Date.now() - sttStartTime;
   const translationStartTime = Date.now();
+
+  const OpenAI = (await import("openai")).default;
+  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
   const languagesToTranslate = Array.isArray(targetLanguages) && targetLanguages.length > 0
     ? targetLanguages
@@ -409,7 +418,7 @@ router.post("/translate/chunk", async (req, res): Promise<void> => {
     translationLatencyMs,
     ttsLatencyMs,
     confidence,
-    model: diarize ? DIARIZE_MODEL : STT_MODEL,
+    sttModel: usedSttModel,
   });
 });
 

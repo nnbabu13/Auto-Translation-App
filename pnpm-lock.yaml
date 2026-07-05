@@ -156,6 +156,9 @@ importers:
 
   artifacts/api-server:
     dependencies:
+      '@deepgram/sdk':
+        specifier: ^5.5.0
+        version: 5.5.0
       '@workspace/api-zod':
         specifier: workspace:*
         version: link:../../lib/api-zod
@@ -179,7 +182,7 @@ importers:
         version: 5.2.1
       openai:
         specifier: ^6.44.0
-        version: 6.44.0(zod@3.25.76)
+        version: 6.44.0(ws@8.21.0)(zod@3.25.76)
       openid-client:
         specifier: ^6.8.4
         version: 6.8.4
@@ -761,6 +764,10 @@ packages:
 
   '@date-fns/tz@1.4.1':
     resolution: {integrity: sha512-P5LUNhtbj6YfI3iJjw5EL9eUAG6OitD0W3fWQcpQjDRc/QIsL0tRNuO1PcDvPccWL1fSTXXdE1ds+l95DV/OFA==}
+
+  '@deepgram/sdk@5.5.0':
+    resolution: {integrity: sha512-9x3hwDuG9ysMwugklHX1Ta8Rg6NuZE4kByRB7OM5w3dvdwNxW6X+eDiGHga44eF5d51KD0w54pPa+7GGb84t7w==}
+    engines: {node: '>=18.0.0'}
 
   '@drizzle-team/brocli@0.10.2':
     resolution: {integrity: sha512-z33Il7l5dKjUgGULTqBsQBQwckHh5AbIuxhdsIxDDiZAzBOrZO6q9ogcWC65kU382AfynTfgNumVcNIjuIua6w==}
@@ -3375,6 +3382,18 @@ packages:
   wrappy@1.0.2:
     resolution: {integrity: sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ==}
 
+  ws@8.21.0:
+    resolution: {integrity: sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g==}
+    engines: {node: '>=10.0.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
+
   xtend@4.0.2:
     resolution: {integrity: sha512-LKYU1iAXJXUgAXn9URjiu+MWhyUXHsvfp7mcuYm9dSUKK0/CjtrUwFAxD82/mCWbtLsGjFIad0wIsod4zrTAEQ==}
     engines: {node: '>=0.4'}
@@ -3519,6 +3538,13 @@ snapshots:
       commander: 14.0.3
 
   '@date-fns/tz@1.4.1': {}
+
+  '@deepgram/sdk@5.5.0':
+    dependencies:
+      ws: 8.21.0
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
 
   '@drizzle-team/brocli@0.10.2': {}
 
@@ -5434,8 +5460,9 @@ snapshots:
       platform: 1.3.6
       protobufjs: 7.6.4
 
-  openai@6.44.0(zod@3.25.76):
+  openai@6.44.0(ws@8.21.0)(zod@3.25.76):
     optionalDependencies:
+      ws: 8.21.0
       zod: 3.25.76
 
   openid-client@6.8.4:
@@ -6108,6 +6135,8 @@ snapshots:
       use-sync-external-store: 1.6.0(react@19.1.0)
 
   wrappy@1.0.2: {}
+
+  ws@8.21.0: {}
 
   xtend@4.0.2: {}
 
