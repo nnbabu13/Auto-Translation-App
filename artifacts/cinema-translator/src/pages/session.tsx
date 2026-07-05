@@ -128,6 +128,7 @@ export default function SessionScreen() {
   const [sttModel, setSttModel] = useState("nova-3");
   const [recordedChunks, setRecordedChunks] = useState<RecordedChunk[]>([]);
   const [diarizationEnabled, setDiarizationEnabled] = useState(false);
+  const [turboMode, setTurboMode] = useState(false);
   const [currentSpeaker, setCurrentSpeaker] = useState<string | null>(null);
   const [transcriptWithSpeakers, setTranscriptWithSpeakers] = useState<{speaker: string | null; text: string; timestamp: number}[]>([]);
 
@@ -583,7 +584,9 @@ export default function SessionScreen() {
             setListeningActive(true);
           },
           onSpeechEnd: async (audio: Float32Array) => {
-            const durationMs = (audio.length / 16000) * 1000;
+            const SAMPLE_RATE = 16000;
+            const TURBO_CHUNK_MS = 1500;
+            const durationMs = (audio.length / SAMPLE_RATE) * 1000;
             let sumSquares = 0;
             let peak = 0;
             for (let i = 0; i < audio.length; i++) {
@@ -594,30 +597,56 @@ export default function SessionScreen() {
             const rmsLevel = Math.sqrt(sumSquares / audio.length);
             const speechDetected = rmsLevel >= 0.003 && durationMs >= 250;
 
-            const segmentStats: AudioStats = {
-              volumeLevel: Math.max(0, Math.min(100, peak * 100)),
-              rmsLevel,
-              peakLevel: peak,
-              speechProbability: speechDetected ? 0.9 : 0.1,
-              isClipping: peak >= 0.99,
-              isSilent: rmsLevel < 0.003,
-              quality: rmsLevel >= 0.03 ? "Excellent" : rmsLevel >= 0.01 ? "Good" : "Poor",
-              speechDetected,
-              acceptedChunkCount: acceptedCount + (speechDetected ? 1 : 0),
-              discardedChunkCount: discardedCount + (speechDetected ? 0 : 1),
-              activeSpeechDurationMs: durationMs,
-              waveform: [],
-            };
-
-            if (speechDetected) {
-              acceptedCount++;
-              const { encodeWavPCM16 } = await import("@/lib/audio/wavEncoder");
-              const wavBlob = encodeWavPCM16(audio, 16000);
-              setAudioStats(segmentStats);
-              processChunkRef.current(wavBlob, acceptedCount - 1, segmentStats);
-            } else {
+            if (!speechDetected) {
               discardedCount++;
-              setAudioStats(segmentStats);
+              setAudioStats({
+                volumeLevel: Math.max(0, Math.min(100, peak * 100)),
+                rmsLevel,
+                peakLevel: peak,
+                speechProbability: 0.1,
+                isClipping: peak >= 0.99,
+                isSilent: rmsLevel < 0.003,
+                quality: "Poor",
+                speechDetected: false,
+                acceptedChunkCount: acceptedCount,
+                discardedChunkCount: discardedCount + 1,
+                activeSpeechDurationMs: durationMs,
+                waveform: [],
+              });
+              return;
+            }
+
+            const { encodeWavPCM16 } = await import("@/lib/audio/wavEncoder");
+
+            const useTurbo = turboMode && durationMs > TURBO_CHUNK_MS;
+            const samplesPerChunk = Math.floor(SAMPLE_RATE * (TURBO_CHUNK_MS / 1000));
+            const totalChunks = useTurbo ? Math.ceil(audio.length / samplesPerChunk) : 1;
+
+            for (let i = 0; i < totalChunks; i++) {
+              const offset = i * samplesPerChunk;
+              const chunkLen = Math.min(samplesPerChunk, audio.length - offset);
+              const subChunk = audio.slice(offset, offset + chunkLen);
+              const chunkDurationMs = (chunkLen / SAMPLE_RATE) * 1000;
+
+              const chunkStats: AudioStats = {
+                volumeLevel: Math.max(0, Math.min(100, peak * 100)),
+                rmsLevel,
+                peakLevel: peak,
+                speechProbability: 0.9,
+                isClipping: peak >= 0.99,
+                isSilent: false,
+                quality: rmsLevel >= 0.03 ? "Excellent" : rmsLevel >= 0.01 ? "Good" : "Poor",
+                speechDetected: true,
+                acceptedChunkCount: acceptedCount + i + 1,
+                discardedChunkCount: discardedCount,
+                activeSpeechDurationMs: chunkDurationMs,
+                waveform: [],
+              };
+
+              acceptedCount++;
+              const wavBlob = encodeWavPCM16(subChunk, SAMPLE_RATE);
+              setAudioStats(chunkStats);
+              processChunkRef.current(wavBlob, acceptedCount - 1, chunkStats);
             }
           },
           onVADMisfire: () => {
@@ -955,6 +984,21 @@ export default function SessionScreen() {
                 </div>
                 <p className="text-xs text-muted-foreground">
                   Identify different speakers in the audio stream.
+                </p>
+                <div className="flex items-center justify-between">
+                  <label className="text-sm text-muted-foreground">
+                    Turbo Mode
+                  </label>
+                  <Button
+                    variant="outline"
+                    className="w-16"
+                    onClick={() => setTurboMode(!turboMode)}
+                  >
+                    {turboMode ? "On" : "Off"}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Split long utterances into 1.5s chunks for faster translation.
                 </p>
               </CardContent>
             </Card>
