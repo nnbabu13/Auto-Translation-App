@@ -137,7 +137,7 @@ export default function SessionNew() {
                           <SelectValue placeholder="Select source language..." />
                         </SelectTrigger>
                       </FormControl>
-                      <SelectContent className="bg-popover border-popover-border text-popover-foreground">
+                      <SelectContent className="bg-popover border-popover-border text-popover-foreground max-h-72 overflow-y-auto">
                         {sourceLanguages.map((lang) => (
                           <SelectItem key={lang.value} value={lang.value} className="text-lg py-3 cursor-pointer">
                             {lang.label}
@@ -162,7 +162,7 @@ export default function SessionNew() {
                           <SelectValue placeholder="Select target language..." />
                         </SelectTrigger>
                       </FormControl>
-                      <SelectContent className="bg-popover border-popover-border text-popover-foreground">
+                      <SelectContent className="bg-popover border-popover-border text-popover-foreground max-h-72 overflow-y-auto">
                         {languages.map((lang) => (
                           <SelectItem key={lang.value} value={lang.value} className="text-lg py-3 cursor-pointer">
                             {lang.label}
