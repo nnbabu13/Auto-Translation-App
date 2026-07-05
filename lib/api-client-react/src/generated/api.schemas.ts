@@ -54,6 +54,7 @@ export interface ErrorEnvelope {
 export interface TranslationSession {
   id: number;
   name: string;
+  sourceLanguage?: string;
   targetLanguage: string;
   targetLanguages?: string[];
   createdAt: string;
@@ -64,6 +65,8 @@ export interface TranslationSession {
 export interface SessionInput {
   /** @minLength 1 */
   name: string;
+  /** @minLength 1 */
+  sourceLanguage?: string;
   /** @minLength 1 */
   targetLanguage: string;
   targetLanguages?: string[];
@@ -93,6 +96,7 @@ export interface LogInput {
 export interface TranslationSessionWithLogs {
   id: number;
   name: string;
+  sourceLanguage?: string;
   targetLanguage: string;
   targetLanguages?: string[];
   createdAt: string;

@@ -119,6 +119,7 @@ export const ListSessionsResponse = zod.array(ListSessionsResponseItem)
 
 export const CreateSessionBody = zod.object({
   "name": zod.string().min(1),
+  "sourceLanguage": zod.string().min(1).default("en"),
   "targetLanguage": zod.string().min(1),
   "targetLanguages": zod.array(zod.string()).optional()
 })

@@ -9,6 +9,7 @@ export const translationSessionsTable = mySchema.table("translation_sessions", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull().references(() => usersTable.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
+  sourceLanguage: text("source_language").notNull().default("en"),
   targetLanguage: text("target_language").notNull(),
   targetLanguages: text("target_languages").array().notNull().default(["en"]),
   createdAt: timestamp("created_at").defaultNow().notNull(),

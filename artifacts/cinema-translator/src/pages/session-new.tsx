@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
@@ -14,7 +13,6 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -22,7 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ArrowLeft, X } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 
 const languages = [
   { value: "English", label: "English" },
@@ -41,47 +39,48 @@ const languages = [
   { value: "Chinese", label: "Chinese" },
 ];
 
+const sourceLanguages = [
+  { value: "en", label: "English" },
+  { value: "el", label: "Greek" },
+  { value: "hi", label: "Hindi" },
+  { value: "te", label: "Telugu" },
+  { value: "ru", label: "Russian" },
+  { value: "de", label: "German" },
+  { value: "fr", label: "French" },
+  { value: "ar", label: "Arabic" },
+  { value: "es", label: "Spanish" },
+  { value: "it", label: "Italian" },
+  { value: "pt", label: "Portuguese" },
+  { value: "ja", label: "Japanese" },
+  { value: "ko", label: "Korean" },
+  { value: "zh", label: "Chinese" },
+];
+
 const formSchema = z.object({
   name: z.string().min(1, "Session name is required"),
-  targetLanguage: z.string().min(1, "Primary target language is required"),
+  sourceLanguage: z.string().min(1, "Source language is required"),
+  targetLanguage: z.string().min(1, "Target language is required"),
 });
 
 export default function SessionNew() {
   const [, setLocation] = useLocation();
   const createSession = useCreateSession();
-  const [additionalLanguages, setAdditionalLanguages] = useState<string[]>([]);
-  const [showLanguagePicker, setShowLanguagePicker] = useState(false);
 
   const form = useForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema),
     defaultValues: {
       name: "",
+      sourceLanguage: "en",
       targetLanguage: "",
     },
   });
 
-  const primaryLanguage = form.watch("targetLanguage");
-
-  const availableLanguages = languages.filter(
-    (l) => l.value !== primaryLanguage && !additionalLanguages.includes(l.value)
-  );
-
-  function addLanguage(lang: string) {
-    setAdditionalLanguages((prev) => [...prev, lang]);
-    setShowLanguagePicker(false);
-  }
-
-  function removeLanguage(lang: string) {
-    setAdditionalLanguages((prev) => prev.filter((l) => l !== lang));
-  }
-
   function onSubmit(values: z.infer<typeof formSchema>) {
-    const allLanguages = [values.targetLanguage, ...additionalLanguages];
     createSession.mutate(
       {
         data: {
           ...values,
-          targetLanguages: allLanguages,
+          targetLanguages: [values.targetLanguage],
         } as any,
       },
       {
@@ -112,15 +111,40 @@ export default function SessionNew() {
                 name="name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel className="text-lg text-white">Session Identifier</FormLabel>
+                    <FormLabel className="text-lg text-white">Session Name</FormLabel>
                     <FormControl>
-                      <Input 
-                        placeholder="e.g. Director's Cut Review - Reel 1" 
-                        className="h-14 text-lg bg-input border-border focus-visible:ring-primary" 
+                      <Input
+                        placeholder="e.g. Director's Cut Review - Reel 1"
+                        className="h-14 text-lg bg-input border-border focus-visible:ring-primary"
                         data-testid="input-session-name"
-                        {...field} 
+                        {...field}
                       />
                     </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name="sourceLanguage"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel className="text-lg text-white">Source Language (Spoken in movie)</FormLabel>
+                    <Select onValueChange={field.onChange} defaultValue={field.value}>
+                      <FormControl>
+                        <SelectTrigger className="h-14 text-lg bg-input border-border focus:ring-primary" data-testid="select-source-language">
+                          <SelectValue placeholder="Select source language..." />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent className="bg-popover border-popover-border text-popover-foreground">
+                        {sourceLanguages.map((lang) => (
+                          <SelectItem key={lang.value} value={lang.value} className="text-lg py-3 cursor-pointer">
+                            {lang.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                     <FormMessage />
                   </FormItem>
                 )}
@@ -131,11 +155,11 @@ export default function SessionNew() {
                 name="targetLanguage"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel className="text-lg text-white">Primary Target Language</FormLabel>
+                    <FormLabel className="text-lg text-white">Target Language (Translate to)</FormLabel>
                     <Select onValueChange={field.onChange} defaultValue={field.value}>
                       <FormControl>
                         <SelectTrigger className="h-14 text-lg bg-input border-border focus:ring-primary" data-testid="select-target-language">
-                          <SelectValue placeholder="Select primary language..." />
+                          <SelectValue placeholder="Select target language..." />
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent className="bg-popover border-popover-border text-popover-foreground">
@@ -151,60 +175,10 @@ export default function SessionNew() {
                 )}
               />
 
-              <div>
-                <Label className="text-lg text-white">Additional Languages (Optional)</Label>
-                <p className="text-sm text-muted-foreground mb-3">Select additional languages to translate into simultaneously.</p>
-
-                {additionalLanguages.length > 0 && (
-                  <div className="flex flex-wrap gap-2 mb-3">
-                    {additionalLanguages.map((lang) => (
-                      <div
-                        key={lang}
-                        className="flex items-center gap-1 bg-primary/20 text-primary px-3 py-1 rounded-full text-sm"
-                      >
-                        {lang}
-                        <button
-                          type="button"
-                          onClick={() => removeLanguage(lang)}
-                          className="hover:text-primary/80"
-                        >
-                          <X className="h-3 w-3" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {showLanguagePicker ? (
-                  <Select onValueChange={addLanguage}>
-                    <SelectTrigger className="h-12 bg-input border-border focus:ring-primary">
-                      <SelectValue placeholder="Add a language..." />
-                    </SelectTrigger>
-                    <SelectContent className="bg-popover border-popover-border text-popover-foreground">
-                      {availableLanguages.map((lang) => (
-                        <SelectItem key={lang.value} value={lang.value} className="text-lg py-3 cursor-pointer">
-                          {lang.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                ) : (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => setShowLanguagePicker(true)}
-                    disabled={!primaryLanguage || availableLanguages.length === 0}
-                    className="border-dashed"
-                  >
-                    + Add Language
-                  </Button>
-                )}
-              </div>
-
               <div className="pt-4 flex justify-end">
-                <Button 
-                  type="submit" 
-                  size="lg" 
+                <Button
+                  type="submit"
+                  size="lg"
                   className="h-16 px-12 text-xl font-bold"
                   disabled={createSession.isPending}
                   data-testid="button-submit-session"

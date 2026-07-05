@@ -94,6 +94,12 @@ export default function SessionScreen() {
   });
   const { toast } = useToast();
 
+  useEffect(() => {
+    if (session?.sourceLanguage) {
+      setSourceLanguageSetting(session.sourceLanguage);
+    }
+  }, [session?.sourceLanguage]);
+
   const [isRecording, setIsRecording] = useState(false);
   const [showDebugPanel, setShowDebugPanel] = useState(false);
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
@@ -731,9 +737,9 @@ export default function SessionScreen() {
           <div>
             <h1 className="text-3xl font-bold text-white tracking-tight">
               {session.name}
-            </h1>
-            <p className="text-primary font-medium tracking-widest uppercase mt-1 text-sm">
-              Target: {session.targetLanguage}
+              </h1>
+              <p className="text-muted-foreground text-sm mt-1">
+                Source: {session.sourceLanguage?.toUpperCase()} &middot; Target: {session.targetLanguage}
             </p>
           </div>
         </div>
@@ -953,27 +959,6 @@ export default function SessionScreen() {
               </CardContent>
             </Card>
           )}
-
-          <Card className="bg-card border-card-border">
-            <CardHeader className="pb-2 border-b border-border">
-              <CardTitle className="text-sm font-medium text-muted-foreground uppercase tracking-wider">
-                Source Language
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="p-4">
-              <select
-                className="w-full bg-background border border-border rounded-md px-3 py-2 text-white"
-                value={sourceLanguageSetting}
-                onChange={(e) => setSourceLanguageSetting(e.target.value)}
-              >
-                <option value="en">English</option>
-                <option value="hi">Hindi</option>
-                <option value="te">Telugu</option>
-                <option value="ru">Russian</option>
-                <option value="el">Greek</option>
-              </select>
-            </CardContent>
-          </Card>
 
           <Card className="bg-card border-card-border">
             <CardContent className="p-6">

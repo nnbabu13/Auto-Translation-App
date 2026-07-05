@@ -21,6 +21,7 @@ router.get("/sessions", async (req, res): Promise<void> => {
     .select({
       id: translationSessionsTable.id,
       name: translationSessionsTable.name,
+      sourceLanguage: translationSessionsTable.sourceLanguage,
       targetLanguage: translationSessionsTable.targetLanguage,
       targetLanguages: translationSessionsTable.targetLanguages,
       createdAt: translationSessionsTable.createdAt,
@@ -46,12 +47,14 @@ router.post("/sessions", async (req, res): Promise<void> => {
   }
 
   const targetLanguages = parsed.data.targetLanguages || [parsed.data.targetLanguage];
+  const sourceLanguage = parsed.data.sourceLanguage || "en";
 
   const [session] = await db
     .insert(translationSessionsTable)
     .values({
       userId: req.user.id,
       name: parsed.data.name,
+      sourceLanguage,
       targetLanguage: parsed.data.targetLanguage,
       targetLanguages,
     })
@@ -81,6 +84,7 @@ router.get("/sessions/stats", async (req, res): Promise<void> => {
     .select({
       id: translationSessionsTable.id,
       name: translationSessionsTable.name,
+      sourceLanguage: translationSessionsTable.sourceLanguage,
       targetLanguage: translationSessionsTable.targetLanguage,
       targetLanguages: translationSessionsTable.targetLanguages,
       createdAt: translationSessionsTable.createdAt,
