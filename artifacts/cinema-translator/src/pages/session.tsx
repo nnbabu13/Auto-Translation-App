@@ -86,6 +86,13 @@ function getRmsIndicator(rmsLevel: number) {
   return { color: "#3b82f6", label: "Very strong signal" };
 }
 
+function concatFloat32Arrays(a: Float32Array, b: Float32Array): Float32Array {
+  const result = new Float32Array(a.length + b.length);
+  result.set(a, 0);
+  result.set(b, a.length);
+  return result;
+}
+
 export default function SessionScreen() {
   const [, params] = useRoute("/sessions/:id");
   const sessionId = Number(params?.id);
@@ -128,10 +135,13 @@ export default function SessionScreen() {
   const [sttModel, setSttModel] = useState("nova-3");
   const [recordedChunks, setRecordedChunks] = useState<RecordedChunk[]>([]);
   const [diarizationEnabled, setDiarizationEnabled] = useState(false);
-  const [turboMode, setTurboMode] = useState(false);
   const [currentSpeaker, setCurrentSpeaker] = useState<string | null>(null);
   const [transcriptWithSpeakers, setTranscriptWithSpeakers] = useState<{speaker: string | null; text: string; timestamp: number}[]>([]);
   const [translationQueueLength, setTranslationQueueLength] = useState(0);
+
+  const [utteranceDurationMs, setUtteranceDurationMs] = useState(0);
+  const [silenceDurationMs, setSilenceDurationMs] = useState(0);
+  const [pendingBufferSizeMs, setPendingBufferSizeMs] = useState(0);
 
   const [audioStats, setAudioStats] = useState<AudioStats>({
     volumeLevel: 0,
@@ -177,6 +187,13 @@ export default function SessionScreen() {
   const transcriptHistoryRef = useRef<{ text: string; timestamp: number }[]>([]);
   const translationDisplayQueueRef = useRef<Array<{ original: string; translated: string; speaker: string | null }>>([]);
 
+  const utteranceBufferRef = useRef<Float32Array>(new Float32Array(0));
+  const utteranceStartTimeRef = useRef<number>(0);
+  const pendingFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const previousUtteranceTailRef = useRef<Float32Array>(new Float32Array(0));
+  const utteranceChunkIndexRef = useRef(0);
+  const accumulatedSilenceMsRef = useRef(0);
+
   const captureWarnings = useMemo(() => {
     const warnings: string[] = [];
     if (audioStats.rmsLevel < 0.005) {
@@ -203,6 +220,18 @@ export default function SessionScreen() {
     if (!queueManagerRef.current) {
       queueManagerRef.current = new QueueManager();
     }
+  }, [isRecording]);
+
+  useEffect(() => {
+    if (!isRecording) return;
+    const interval = setInterval(() => {
+      const bufLen = utteranceBufferRef.current.length;
+      const durMs = bufLen > 0 ? (bufLen / 16000) * 1000 : 0;
+      setUtteranceDurationMs(Math.round(durMs));
+      setPendingBufferSizeMs(Math.round(durMs));
+      setSilenceDurationMs(Math.round(accumulatedSilenceMsRef.current));
+    }, 200);
+    return () => clearInterval(interval);
   }, [isRecording]);
 
   const loadAudioDevices = useCallback(async () => {
@@ -536,6 +565,71 @@ export default function SessionScreen() {
   const processChunkRef = useRef(processChunk);
   processChunkRef.current = processChunk;
 
+  const flushUtterance = useCallback(async () => {
+    const buffer = utteranceBufferRef.current;
+    if (buffer.length === 0) return;
+
+    if (pendingFlushTimerRef.current) {
+      clearTimeout(pendingFlushTimerRef.current);
+      pendingFlushTimerRef.current = null;
+    }
+
+    const SAMPLE_RATE = 16000;
+    let audioToSend = buffer;
+    if (previousUtteranceTailRef.current.length > 0) {
+      audioToSend = concatFloat32Arrays(previousUtteranceTailRef.current, buffer);
+    }
+
+    const tailSamples = SAMPLE_RATE * 2;
+    if (buffer.length > tailSamples) {
+      previousUtteranceTailRef.current = buffer.slice(-tailSamples);
+    } else {
+      previousUtteranceTailRef.current = new Float32Array(buffer);
+    }
+
+    utteranceBufferRef.current = new Float32Array(0);
+    utteranceStartTimeRef.current = 0;
+    accumulatedSilenceMsRef.current = 0;
+    setUtteranceDurationMs(0);
+    setPendingBufferSizeMs(0);
+    setSilenceDurationMs(0);
+
+    const durationMs = (audioToSend.length / SAMPLE_RATE) * 1000;
+    let sumSquares = 0;
+    let peak = 0;
+    for (let i = 0; i < audioToSend.length; i++) {
+      const val = audioToSend[i];
+      sumSquares += val * val;
+      peak = Math.max(peak, Math.abs(val));
+    }
+    const rmsLevel = Math.sqrt(sumSquares / audioToSend.length);
+
+    const { encodeWavPCM16 } = await import("@/lib/audio/wavEncoder");
+    const wavBlob = encodeWavPCM16(audioToSend, SAMPLE_RATE);
+
+    const stats: AudioStats = {
+      volumeLevel: Math.max(0, Math.min(100, peak * 100)),
+      rmsLevel,
+      peakLevel: peak,
+      speechProbability: 0.9,
+      isClipping: peak >= 0.99,
+      isSilent: false,
+      quality: rmsLevel >= 0.03 ? "Excellent" : rmsLevel >= 0.01 ? "Good" : "Poor",
+      speechDetected: true,
+      acceptedChunkCount: utteranceChunkIndexRef.current + 1,
+      discardedChunkCount: 0,
+      activeSpeechDurationMs: durationMs,
+      waveform: [],
+    };
+
+    utteranceChunkIndexRef.current++;
+    setAudioStats(stats);
+    processChunkRef.current(wavBlob, utteranceChunkIndexRef.current, stats);
+  }, []);
+
+  const flushUtteranceRef = useRef<() => Promise<void>>(async () => {});
+  flushUtteranceRef.current = flushUtterance;
+
 
   const startRecording = async () => {
     if (!session || isRecording) return;
@@ -576,76 +670,80 @@ export default function SessionScreen() {
       lastRecordedChunkRef.current = null;
       await loadAudioDevices();
 
-      let acceptedCount = 0;
-      let discardedCount = 0;
+      let vadAcceptedCount = 0;
 
       const vad = await createSileroVad(
         {
           onSpeechStart: () => {
             setListeningActive(true);
+            if (pendingFlushTimerRef.current) {
+              clearTimeout(pendingFlushTimerRef.current);
+              pendingFlushTimerRef.current = null;
+            }
           },
           onSpeechEnd: async (audio: Float32Array) => {
+            const currentBuf = utteranceBufferRef.current;
+            const newBuf = concatFloat32Arrays(currentBuf, audio);
+            utteranceBufferRef.current = newBuf;
+
+            if (utteranceStartTimeRef.current === 0) {
+              utteranceStartTimeRef.current = Date.now();
+            }
+
+            vadAcceptedCount++;
+
             const SAMPLE_RATE = 16000;
-            const TURBO_CHUNK_MS = 1500;
-            const durationMs = (audio.length / SAMPLE_RATE) * 1000;
-            let sumSquares = 0;
-            let peak = 0;
-            for (let i = 0; i < audio.length; i++) {
-              const val = audio[i];
-              sumSquares += val * val;
-              peak = Math.max(peak, Math.abs(val));
+            const totalDurationMs = (newBuf.length / SAMPLE_RATE) * 1000;
+
+            setUtteranceDurationMs(Math.round(totalDurationMs));
+            setPendingBufferSizeMs(Math.round(totalDurationMs));
+
+            if (totalDurationMs >= 12000) {
+              await flushUtteranceRef.current();
+              return;
             }
-            const rmsLevel = Math.sqrt(sumSquares / audio.length);
 
-            const { encodeWavPCM16 } = await import("@/lib/audio/wavEncoder");
-
-            const useTurbo = turboMode && durationMs > TURBO_CHUNK_MS;
-            const samplesPerChunk = Math.floor(SAMPLE_RATE * (TURBO_CHUNK_MS / 1000));
-            const totalChunks = useTurbo ? Math.ceil(audio.length / samplesPerChunk) : 1;
-
-            for (let i = 0; i < totalChunks; i++) {
-              const offset = i * samplesPerChunk;
-              const chunkLen = Math.min(samplesPerChunk, audio.length - offset);
-              const subChunk = audio.slice(offset, offset + chunkLen);
-              const chunkDurationMs = (chunkLen / SAMPLE_RATE) * 1000;
-
-              const chunkStats: AudioStats = {
-                volumeLevel: Math.max(0, Math.min(100, peak * 100)),
-                rmsLevel,
-                peakLevel: peak,
-                speechProbability: 0.9,
-                isClipping: peak >= 0.99,
-                isSilent: false,
-                quality: rmsLevel >= 0.03 ? "Excellent" : rmsLevel >= 0.01 ? "Good" : "Poor",
-                speechDetected: true,
-                acceptedChunkCount: acceptedCount + i + 1,
-                discardedChunkCount: discardedCount,
-                activeSpeechDurationMs: chunkDurationMs,
-                waveform: [],
-              };
-
-              acceptedCount++;
-              const wavBlob = encodeWavPCM16(subChunk, SAMPLE_RATE);
-              setAudioStats(chunkStats);
-              processChunkRef.current(wavBlob, acceptedCount - 1, chunkStats);
+            if (pendingFlushTimerRef.current) {
+              clearTimeout(pendingFlushTimerRef.current);
             }
+
+            pendingFlushTimerRef.current = setTimeout(async () => {
+              const bufLen = utteranceBufferRef.current.length;
+              const durMs = (bufLen / SAMPLE_RATE) * 1000;
+              const elapsedSinceStart = utteranceStartTimeRef.current > 0
+                ? Date.now() - utteranceStartTimeRef.current
+                : 0;
+
+              if (durMs >= 3000 || elapsedSinceStart > 10000) {
+                await flushUtteranceRef.current();
+              } else {
+                pendingFlushTimerRef.current = setTimeout(async () => {
+                  await flushUtteranceRef.current();
+                }, 2000);
+              }
+            }, 2000);
           },
-          onVADMisfire: () => {
-            discardedCount++;
-          },
+          onVADMisfire: () => {},
           onFrameProcessed: (probability: number) => {
             setAudioStats((prev) => ({
               ...prev,
               speechProbability: probability,
+              acceptedChunkCount: vadAcceptedCount,
             }));
+
+            if (probability < 0.10) {
+              accumulatedSilenceMsRef.current += 32;
+            } else {
+              accumulatedSilenceMsRef.current = 0;
+            }
           },
         },
         {
           positiveSpeechThreshold: 0.3,
-          negativeSpeechThreshold: 0.25,
-          redemptionMs: cinemaMode ? 2000 : 1400,
-          minSpeechMs: cinemaMode ? 1500 : 1000,
-          preSpeechPadMs: 800,
+          negativeSpeechThreshold: 0.10,
+          redemptionMs: 1500,
+          minSpeechMs: 0,
+          preSpeechPadMs: 400,
           model: "v5",
           stream: streamRef.current,
           submitUserSpeechOnPause: true,
@@ -681,6 +779,13 @@ export default function SessionScreen() {
   };
 
   const stopRecording = useCallback(async () => {
+    if (pendingFlushTimerRef.current) {
+      clearTimeout(pendingFlushTimerRef.current);
+      pendingFlushTimerRef.current = null;
+    }
+    if (utteranceBufferRef.current.length > 0) {
+      await flushUtteranceRef.current();
+    }
     if (vadRef.current) {
       await vadRef.current.destroy();
       vadRef.current = null;
@@ -973,21 +1078,6 @@ export default function SessionScreen() {
                 <p className="text-xs text-muted-foreground">
                   Identify different speakers in the audio stream.
                 </p>
-                <div className="flex items-center justify-between">
-                  <label className="text-sm text-muted-foreground">
-                    Turbo Mode
-                  </label>
-                  <Button
-                    variant="outline"
-                    className="w-16"
-                    onClick={() => setTurboMode(!turboMode)}
-                  >
-                    {turboMode ? "On" : "Off"}
-                  </Button>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  Split long utterances into 1.5s chunks for faster translation.
-                </p>
               </CardContent>
             </Card>
           )}
@@ -1102,6 +1192,31 @@ export default function SessionScreen() {
                 <span className="text-white font-mono">
                   {(audioStats.speechProbability * 100).toFixed(0)}%
                 </span>
+              </div>
+              <div className="border-t border-border pt-3 mt-3">
+                <p className="text-xs font-medium text-primary uppercase tracking-wider mb-2">
+                  Movie Mode
+                </p>
+                <div className="space-y-1">
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">Utterance</span>
+                    <span className="text-white font-mono">
+                      {(utteranceDurationMs / 1000).toFixed(1)}s
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">Silence</span>
+                    <span className="text-white font-mono">
+                      {(silenceDurationMs / 1000).toFixed(1)}s
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">Buffer</span>
+                    <span className="text-white font-mono">
+                      {(pendingBufferSizeMs / 1000).toFixed(1)}s
+                    </span>
+                  </div>
+                </div>
               </div>
               <div className="flex justify-between text-sm">
                 <span className="text-muted-foreground">RMS Level</span>
