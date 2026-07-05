@@ -587,24 +587,9 @@ export default function SessionScreen() {
               peak = Math.max(peak, Math.abs(val));
             }
             const rmsLevel = Math.sqrt(sumSquares / audio.length);
-            const speechDetected = rmsLevel >= 0.003 && durationMs >= 250;
 
-            if (!speechDetected) {
+            if (durationMs < 200) {
               discardedCount++;
-              setAudioStats({
-                volumeLevel: Math.max(0, Math.min(100, peak * 100)),
-                rmsLevel,
-                peakLevel: peak,
-                speechProbability: 0.1,
-                isClipping: peak >= 0.99,
-                isSilent: rmsLevel < 0.003,
-                quality: "Poor",
-                speechDetected: false,
-                acceptedChunkCount: acceptedCount,
-                discardedChunkCount: discardedCount + 1,
-                activeSpeechDurationMs: durationMs,
-                waveform: [],
-              });
               return;
             }
 
@@ -652,11 +637,11 @@ export default function SessionScreen() {
           },
         },
         {
-          positiveSpeechThreshold: 0.5,
-          negativeSpeechThreshold: 0.30,
-          redemptionMs: cinemaMode ? 3000 : 2000,
-          minSpeechMs: cinemaMode ? 800 : 500,
-          preSpeechPadMs: 100,
+          positiveSpeechThreshold: 0.4,
+          negativeSpeechThreshold: 0.35,
+          redemptionMs: cinemaMode ? 1500 : 1000,
+          minSpeechMs: cinemaMode ? 300 : 200,
+          preSpeechPadMs: 150,
           model: "v5",
           stream: streamRef.current,
         },
