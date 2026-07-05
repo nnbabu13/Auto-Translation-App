@@ -69,35 +69,37 @@ router.get("/sessions/stats", async (req, res): Promise<void> => {
     return;
   }
 
-  const [totalSessionsRow] = await db
-    .select({ count: sql<number>`COUNT(*)::int` })
-    .from(translationSessionsTable)
-    .where(eq(translationSessionsTable.userId, req.user.id));
+  const userId = req.user.id;
 
-  const [totalLogsRow] = await db
-    .select({ count: sql<number>`COUNT(*)::int` })
-    .from(translationLogsTable)
-    .innerJoin(translationSessionsTable, eq(translationLogsTable.sessionId, translationSessionsTable.id))
-    .where(eq(translationSessionsTable.userId, req.user.id));
-
-  const recentSessions = await db
-    .select({
-      id: translationSessionsTable.id,
-      name: translationSessionsTable.name,
-      sourceLanguage: translationSessionsTable.sourceLanguage,
-      targetLanguage: translationSessionsTable.targetLanguage,
-      targetLanguages: translationSessionsTable.targetLanguages,
-      createdAt: translationSessionsTable.createdAt,
-      logCount: sql<number>`(SELECT COUNT(*) FROM translation_logs WHERE session_id = ${translationSessionsTable.id})::int`,
-    })
-    .from(translationSessionsTable)
-    .where(eq(translationSessionsTable.userId, req.user.id))
-    .orderBy(desc(translationSessionsTable.createdAt))
-    .limit(5);
+  const [totalSessionsResult, totalLogsResult, recentSessions] = await Promise.all([
+    db
+      .select({ count: sql<number>`COUNT(*)::int` })
+      .from(translationSessionsTable)
+      .where(eq(translationSessionsTable.userId, userId)),
+    db
+      .select({ count: sql<number>`COUNT(*)::int` })
+      .from(translationLogsTable)
+      .innerJoin(translationSessionsTable, eq(translationLogsTable.sessionId, translationSessionsTable.id))
+      .where(eq(translationSessionsTable.userId, userId)),
+    db
+      .select({
+        id: translationSessionsTable.id,
+        name: translationSessionsTable.name,
+        sourceLanguage: translationSessionsTable.sourceLanguage,
+        targetLanguage: translationSessionsTable.targetLanguage,
+        targetLanguages: translationSessionsTable.targetLanguages,
+        createdAt: translationSessionsTable.createdAt,
+        logCount: sql<number>`(SELECT COUNT(*) FROM translation_logs WHERE session_id = ${translationSessionsTable.id})::int`,
+      })
+      .from(translationSessionsTable)
+      .where(eq(translationSessionsTable.userId, userId))
+      .orderBy(desc(translationSessionsTable.createdAt))
+      .limit(5),
+  ]);
 
   res.json({
-    totalSessions: totalSessionsRow?.count ?? 0,
-    totalLogs: totalLogsRow?.count ?? 0,
+    totalSessions: totalSessionsResult[0]?.count ?? 0,
+    totalLogs: totalLogsResult[0]?.count ?? 0,
     recentSessions,
   });
 });
