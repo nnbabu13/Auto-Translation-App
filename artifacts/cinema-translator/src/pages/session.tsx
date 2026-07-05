@@ -131,6 +131,7 @@ export default function SessionScreen() {
   const [turboMode, setTurboMode] = useState(false);
   const [currentSpeaker, setCurrentSpeaker] = useState<string | null>(null);
   const [transcriptWithSpeakers, setTranscriptWithSpeakers] = useState<{speaker: string | null; text: string; timestamp: number}[]>([]);
+  const [translationQueueLength, setTranslationQueueLength] = useState(0);
 
   const [audioStats, setAudioStats] = useState<AudioStats>({
     volumeLevel: 0,
@@ -174,6 +175,7 @@ export default function SessionScreen() {
   const translationsRef = useRef<string[]>([]);
   const segmentsRef = useRef<Blob[]>([]);
   const transcriptHistoryRef = useRef<{ text: string; timestamp: number }[]>([]);
+  const translationDisplayQueueRef = useRef<Array<{ original: string; translated: string; speaker: string | null }>>([]);
 
   const captureWarnings = useMemo(() => {
     const warnings: string[] = [];
@@ -450,11 +452,11 @@ export default function SessionScreen() {
         transcriptHistoryRef.current.push({ text: data.originalText, timestamp: Date.now() });
 
         setOriginalText(data.originalText);
-        setTranslatedText(data.translatedText);
         setSourceLanguage(data.sourceLanguage);
         setLatency(data.latencyMs);
         setConfidence(data.confidence);
-        
+
+        const speakerName = data.speaker || null;
         if (data.speaker) {
           setCurrentSpeaker(data.speaker);
           setTranscriptWithSpeakers(prev => [...prev.slice(-30), {
@@ -464,11 +466,18 @@ export default function SessionScreen() {
           }]);
         }
 
+        let primaryTranslation = data.translatedText;
         if (data.translations) {
           const translations = data.translations as Record<string, string>;
-          const primaryTranslation = translations[session.targetLanguage] || data.translatedText;
-          setTranslatedText(primaryTranslation);
+          primaryTranslation = translations[session.targetLanguage] || data.translatedText;
         }
+
+        translationDisplayQueueRef.current.push({
+          original: data.originalText,
+          translated: primaryTranslation,
+          speaker: speakerName,
+        });
+        setTranslationQueueLength(translationDisplayQueueRef.current.length);
         
         updateRecordedChunk(chunkNumber, {
           transcriptionResult: data.originalText,
@@ -644,9 +653,10 @@ export default function SessionScreen() {
         },
         {
           positiveSpeechThreshold: 0.5,
-          negativeSpeechThreshold: 0.35,
-          redemptionMs: cinemaMode ? 1000 : 500,
-          minSpeechMs: cinemaMode ? 300 : 250,
+          negativeSpeechThreshold: 0.30,
+          redemptionMs: cinemaMode ? 3000 : 2000,
+          minSpeechMs: cinemaMode ? 800 : 500,
+          preSpeechPadMs: 100,
           model: "v5",
           stream: streamRef.current,
         },
@@ -718,6 +728,22 @@ export default function SessionScreen() {
       stopRecording();
     };
   }, [stopRecording]);
+
+  useEffect(() => {
+    const DISPLAY_INTERVAL_MS = 1500;
+    const interval = setInterval(() => {
+      const queue = translationDisplayQueueRef.current;
+      if (queue.length > 0) {
+        const next = queue.shift()!;
+        setTranslatedText(next.translated);
+        if (next.speaker) {
+          setCurrentSpeaker(next.speaker);
+        }
+        setTranslationQueueLength(queue.length);
+      }
+    }, DISPLAY_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, []);
 
   if (isLoading || !session) {
     return (
@@ -1243,6 +1269,11 @@ export default function SessionScreen() {
               <p className="text-4xl lg:text-5xl font-bold leading-tight text-white">
                 {translatedText || "Translation will appear here..."}
               </p>
+              {translationQueueLength > 0 && (
+                <div className="mt-3 text-sm text-muted-foreground animate-pulse">
+                  {translationQueueLength} more translation{translationQueueLength > 1 ? "s" : ""} queued...
+                </div>
+              )}
               {session.targetLanguages && session.targetLanguages.length > 1 && (
                 <div className="mt-4 text-sm text-muted-foreground">
                   Translating to: {session.targetLanguages.join(", ")}
