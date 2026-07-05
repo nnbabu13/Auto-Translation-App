@@ -189,10 +189,12 @@ export default function SessionScreen() {
 
   const utteranceBufferRef = useRef<Float32Array>(new Float32Array(0));
   const utteranceStartTimeRef = useRef<number>(0);
-  const pendingFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previousUtteranceTailRef = useRef<Float32Array>(new Float32Array(0));
   const utteranceChunkIndexRef = useRef(0);
-  const accumulatedSilenceMsRef = useRef(0);
+  const lastSpeechEndTimeRef = useRef<number>(Date.now());
+  const speechDensityRef = useRef({ speechFrames: 0, totalFrames: 0 });
+
+  const [speechDensity, setSpeechDensity] = useState(0);
 
   const captureWarnings = useMemo(() => {
     const warnings: string[] = [];
@@ -229,7 +231,11 @@ export default function SessionScreen() {
       const durMs = bufLen > 0 ? (bufLen / 16000) * 1000 : 0;
       setUtteranceDurationMs(Math.round(durMs));
       setPendingBufferSizeMs(Math.round(durMs));
-      setSilenceDurationMs(Math.round(accumulatedSilenceMsRef.current));
+      setSilenceDurationMs(Date.now() - lastSpeechEndTimeRef.current);
+      const density = speechDensityRef.current;
+      setSpeechDensity(
+        density.totalFrames > 0 ? density.speechFrames / density.totalFrames : 0,
+      );
     }, 200);
     return () => clearInterval(interval);
   }, [isRecording]);
@@ -569,11 +575,6 @@ export default function SessionScreen() {
     const buffer = utteranceBufferRef.current;
     if (buffer.length === 0) return;
 
-    if (pendingFlushTimerRef.current) {
-      clearTimeout(pendingFlushTimerRef.current);
-      pendingFlushTimerRef.current = null;
-    }
-
     const SAMPLE_RATE = 16000;
     let audioToSend = buffer;
     if (previousUtteranceTailRef.current.length > 0) {
@@ -589,7 +590,7 @@ export default function SessionScreen() {
 
     utteranceBufferRef.current = new Float32Array(0);
     utteranceStartTimeRef.current = 0;
-    accumulatedSilenceMsRef.current = 0;
+    speechDensityRef.current = { speechFrames: 0, totalFrames: 0 };
     setUtteranceDurationMs(0);
     setPendingBufferSizeMs(0);
     setSilenceDurationMs(0);
@@ -676,52 +677,52 @@ export default function SessionScreen() {
         {
           onSpeechStart: () => {
             setListeningActive(true);
-            if (pendingFlushTimerRef.current) {
-              clearTimeout(pendingFlushTimerRef.current);
-              pendingFlushTimerRef.current = null;
-            }
           },
           onSpeechEnd: async (audio: Float32Array) => {
-            const currentBuf = utteranceBufferRef.current;
-            const newBuf = concatFloat32Arrays(currentBuf, audio);
-            utteranceBufferRef.current = newBuf;
-
-            if (utteranceStartTimeRef.current === 0) {
-              utteranceStartTimeRef.current = Date.now();
-            }
-
-            vadAcceptedCount++;
-
             const SAMPLE_RATE = 16000;
-            const totalDurationMs = (newBuf.length / SAMPLE_RATE) * 1000;
+            const density = speechDensityRef.current;
+            const currentDensity = density.totalFrames > 0
+              ? density.speechFrames / density.totalFrames
+              : 0.5;
+            const adaptiveMaxMs = currentDensity > 0.8 ? 5000 : 8000;
+            const maxChunkSamples = Math.floor(SAMPLE_RATE * (adaptiveMaxMs / 1000));
 
-            setUtteranceDurationMs(Math.round(totalDurationMs));
-            setPendingBufferSizeMs(Math.round(totalDurationMs));
+            let offset = 0;
+            while (offset < audio.length) {
+              const chunkLen = Math.min(maxChunkSamples, audio.length - offset);
+              const subChunk = audio.slice(offset, offset + chunkLen);
+              offset += chunkLen;
 
-            if (totalDurationMs >= 12000) {
-              await flushUtteranceRef.current();
-              return;
-            }
+              const currentBuf = utteranceBufferRef.current;
+              utteranceBufferRef.current = concatFloat32Arrays(currentBuf, subChunk);
 
-            if (pendingFlushTimerRef.current) {
-              clearTimeout(pendingFlushTimerRef.current);
-            }
-
-            pendingFlushTimerRef.current = setTimeout(async () => {
-              const bufLen = utteranceBufferRef.current.length;
-              const durMs = (bufLen / SAMPLE_RATE) * 1000;
-              const elapsedSinceStart = utteranceStartTimeRef.current > 0
-                ? Date.now() - utteranceStartTimeRef.current
-                : 0;
-
-              if (durMs >= 3000 || elapsedSinceStart > 10000) {
-                await flushUtteranceRef.current();
-              } else {
-                pendingFlushTimerRef.current = setTimeout(async () => {
-                  await flushUtteranceRef.current();
-                }, 2000);
+              if (utteranceStartTimeRef.current === 0) {
+                utteranceStartTimeRef.current = Date.now();
               }
-            }, 2000);
+
+              vadAcceptedCount++;
+
+              const totalDurationMs = (utteranceBufferRef.current.length / SAMPLE_RATE) * 1000;
+              setUtteranceDurationMs(Math.round(totalDurationMs));
+              setPendingBufferSizeMs(Math.round(totalDurationMs));
+
+              if (totalDurationMs >= 12000) {
+                await flushUtteranceRef.current();
+                continue;
+              }
+
+              if (totalDurationMs >= adaptiveMaxMs) {
+                await flushUtteranceRef.current();
+                continue;
+              }
+            }
+
+            lastSpeechEndTimeRef.current = Date.now();
+
+            const remainingMs = (utteranceBufferRef.current.length / SAMPLE_RATE) * 1000;
+            if (remainingMs >= 3000) {
+              await flushUtteranceRef.current();
+            }
           },
           onVADMisfire: () => {},
           onFrameProcessed: (probability: number) => {
@@ -731,10 +732,10 @@ export default function SessionScreen() {
               acceptedChunkCount: vadAcceptedCount,
             }));
 
-            if (probability < 0.10) {
-              accumulatedSilenceMsRef.current += 32;
-            } else {
-              accumulatedSilenceMsRef.current = 0;
+            const density = speechDensityRef.current;
+            density.totalFrames++;
+            if (probability >= 0.10) {
+              density.speechFrames++;
             }
           },
         },
@@ -779,10 +780,6 @@ export default function SessionScreen() {
   };
 
   const stopRecording = useCallback(async () => {
-    if (pendingFlushTimerRef.current) {
-      clearTimeout(pendingFlushTimerRef.current);
-      pendingFlushTimerRef.current = null;
-    }
     if (utteranceBufferRef.current.length > 0) {
       await flushUtteranceRef.current();
     }
@@ -1199,9 +1196,15 @@ export default function SessionScreen() {
                 </p>
                 <div className="space-y-1">
                   <div className="flex justify-between text-sm">
-                    <span className="text-muted-foreground">Utterance</span>
+                    <span className="text-muted-foreground">Chunk</span>
                     <span className="text-white font-mono">
                       {(utteranceDurationMs / 1000).toFixed(1)}s
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">Density</span>
+                    <span className="text-white font-mono">
+                      {(speechDensity * 100).toFixed(0)}%
                     </span>
                   </div>
                   <div className="flex justify-between text-sm">
