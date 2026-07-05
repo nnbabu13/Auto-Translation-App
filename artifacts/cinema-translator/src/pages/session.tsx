@@ -884,16 +884,8 @@ export default function SessionScreen() {
             }
 
             const bufLen = utteranceBufferRef.current.length;
-            if (Date.now() - lastFlushTimeRef.current > 6000) {
-              if (bufLen > 0) {
-                flushUtteranceRef.current();
-              } else if (vadRef.current) {
-                const vad = vadRef.current;
-                setTimeout(async () => {
-                  await vad.pause();
-                  vad.start();
-                }, 0);
-              }
+            if (bufLen > 0 && Date.now() - lastFlushTimeRef.current > 6000) {
+              flushUtteranceRef.current();
             }
           },
         },
