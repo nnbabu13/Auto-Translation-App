@@ -203,6 +203,7 @@ export default function SessionScreen() {
   const previousUtteranceTailRef = useRef<Float32Array>(new Float32Array(0));
   const utteranceChunkIndexRef = useRef(0);
   const lastSpeechEndTimeRef = useRef<number>(Date.now());
+  const lastFlushTimeRef = useRef<number>(Date.now());
   const speechDensityRef = useRef({ speechFrames: 0, totalFrames: 0 });
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const translationEndRef = useRef<HTMLDivElement>(null);
@@ -732,6 +733,7 @@ export default function SessionScreen() {
 
     utteranceBufferRef.current = new Float32Array(0);
     utteranceStartTimeRef.current = 0;
+    lastFlushTimeRef.current = Date.now();
     speechDensityRef.current = { speechFrames: 0, totalFrames: 0 };
     setUtteranceDurationMs(0);
     setPendingBufferSizeMs(0);
@@ -878,6 +880,11 @@ export default function SessionScreen() {
             density.totalFrames++;
             if (probability >= 0.10) {
               density.speechFrames++;
+            }
+
+            const bufLen = utteranceBufferRef.current.length;
+            if (bufLen > 0 && Date.now() - lastFlushTimeRef.current > 8000) {
+              flushUtteranceRef.current();
             }
           },
         },
