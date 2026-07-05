@@ -1,5 +1,5 @@
 {
-  "installCommand": "corepack enable && corepack use pnpm@11.9.0 && pnpm install",
+  "installCommand": "npm i -g pnpm@11.9.0 && pnpm install --no-frozen-lockfile",
   "buildCommand": "pnpm run vercel:build",
   "outputDirectory": "artifacts/cinema-translator/dist",
   "framework": null,
