@@ -18,6 +18,7 @@ export interface SileroVadOptions {
   model?: "v5" | "legacy";
   stream?: MediaStream;
   audioContext?: AudioContext;
+  submitUserSpeechOnPause?: boolean;
 }
 
 let vadInstance: MicVAD | null = null;
@@ -35,6 +36,7 @@ export async function createSileroVad(
     model = "v5",
     stream,
     audioContext,
+    submitUserSpeechOnPause = true,
   } = options;
 
   console.log("[VAD] Initializing with model:", model, "stream:", !!stream);
@@ -48,6 +50,7 @@ export async function createSileroVad(
     preSpeechPadMs,
     baseAssetPath: "/",
     onnxWASMBasePath: "/",
+    submitUserSpeechOnPause,
     ...(stream ? { getStream: () => Promise.resolve(stream) } : {}),
     ...(audioContext ? { audioContext } : {}),
     ortConfig: (ort) => {

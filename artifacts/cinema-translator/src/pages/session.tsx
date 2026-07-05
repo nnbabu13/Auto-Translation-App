@@ -538,8 +538,17 @@ export default function SessionScreen() {
 
 
   const startRecording = async () => {
-    if (!session) return;
+    if (!session || isRecording) return;
     try {
+      if (vadRef.current) {
+        vadRef.current.destroy();
+        vadRef.current = null;
+      }
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+      }
+
       let stream: MediaStream;
 
       stream = await navigator.mediaDevices.getUserMedia({
@@ -588,11 +597,6 @@ export default function SessionScreen() {
             }
             const rmsLevel = Math.sqrt(sumSquares / audio.length);
 
-            if (durationMs < 200) {
-              discardedCount++;
-              return;
-            }
-
             const { encodeWavPCM16 } = await import("@/lib/audio/wavEncoder");
 
             const useTurbo = turboMode && durationMs > TURBO_CHUNK_MS;
@@ -637,13 +641,14 @@ export default function SessionScreen() {
           },
         },
         {
-          positiveSpeechThreshold: 0.4,
+          positiveSpeechThreshold: 0.5,
           negativeSpeechThreshold: 0.35,
-          redemptionMs: cinemaMode ? 1500 : 1000,
-          minSpeechMs: cinemaMode ? 300 : 200,
-          preSpeechPadMs: 150,
+          redemptionMs: cinemaMode ? 1000 : 500,
+          minSpeechMs: cinemaMode ? 300 : 250,
+          preSpeechPadMs: 30,
           model: "v5",
           stream: streamRef.current,
+          submitUserSpeechOnPause: true,
         },
       );
 
@@ -675,9 +680,9 @@ export default function SessionScreen() {
     }
   };
 
-  const stopRecording = useCallback(() => {
+  const stopRecording = useCallback(async () => {
     if (vadRef.current) {
-      vadRef.current.destroy();
+      await vadRef.current.destroy();
       vadRef.current = null;
     }
     if (streamRef.current) {
@@ -715,8 +720,8 @@ export default function SessionScreen() {
   }, [stopRecording]);
 
   useEffect(() => {
-    const DISPLAY_INTERVAL_MS = 1500;
-    const interval = setInterval(() => {
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const processNext = () => {
       const queue = translationDisplayQueueRef.current;
       if (queue.length > 0) {
         const next = queue.shift()!;
@@ -725,9 +730,13 @@ export default function SessionScreen() {
           setCurrentSpeaker(next.speaker);
         }
         setTranslationQueueLength(queue.length);
+        const charCount = next.translated.length;
+        const delayMs = Math.min(2000, Math.max(1000, charCount * 15));
+        timeoutId = setTimeout(processNext, delayMs);
       }
-    }, DISPLAY_INTERVAL_MS);
-    return () => clearInterval(interval);
+    };
+    timeoutId = setTimeout(processNext, 100);
+    return () => clearTimeout(timeoutId);
   }, []);
 
   if (isLoading || !session) {
