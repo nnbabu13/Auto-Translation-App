@@ -888,8 +888,11 @@ export default function SessionScreen() {
               if (bufLen > 0) {
                 flushUtteranceRef.current();
               } else if (vadRef.current) {
-                vadRef.current.pause();
-                vadRef.current.start();
+                const vad = vadRef.current;
+                setTimeout(async () => {
+                  await vad.pause();
+                  vad.start();
+                }, 0);
               }
             }
           },
