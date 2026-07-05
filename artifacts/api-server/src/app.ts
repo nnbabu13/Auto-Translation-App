@@ -43,11 +43,15 @@ const DEV_USER = {
   profileImageUrl: null,
 };
 
-db.insert(usersTable)
-  .values(DEV_USER)
-  .onConflictDoNothing({ target: usersTable.id })
-  .then(() => logger.info("Dev user ensured in database"))
-  .catch((err) => logger.warn({ err }, "Could not upsert dev user (non-fatal)"));
+if (process.env.DATABASE_URL) {
+  db.insert(usersTable)
+    .values(DEV_USER)
+    .onConflictDoNothing({ target: usersTable.id })
+    .then(() => logger.info("Dev user ensured in database"))
+    .catch((err) => logger.warn({ err }, "Could not upsert dev user (non-fatal)"));
+} else {
+  logger.warn("DATABASE_URL not set — skipping dev user seed");
+}
 
 // Add a mock user to req for development
 app.use((req, res, next) => {
