@@ -108,7 +108,7 @@ export default function SessionScreen() {
   const [benchmarkMode, setBenchmarkMode] = useState(false);
   const [noiseSuppression, setNoiseSuppression] = useState(false);
   const [sourceLanguageSetting, setSourceLanguageSetting] = useState<string>("en");
-  const [audioSource, setAudioSource] = useState<string>("input");
+
   const [audioInputDevices, setAudioInputDevices] = useState<AudioInputDevice[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [activeDeviceName, setActiveDeviceName] = useState("No input selected");
@@ -533,41 +533,24 @@ export default function SessionScreen() {
     try {
       let stream: MediaStream;
 
-      if (audioSource === "system") {
-        const displayStream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-          },
-        });
-        const audioTracks = displayStream.getAudioTracks();
-        if (audioTracks.length === 0) {
-          throw new Error("No system audio track available");
-        }
-        stream = new MediaStream([audioTracks[0]]);
-        setActiveDeviceName("System Audio Capture");
-      } else {
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            deviceId: selectedDeviceId ? { exact: selectedDeviceId } : undefined,
-            channelCount: 1,
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-          },
-        });
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId: selectedDeviceId ? { exact: selectedDeviceId } : undefined,
+          channelCount: 1,
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+      });
 
-        const activeTrack = stream.getAudioTracks()[0];
-        setActiveDeviceName(
-          activeTrack.label
-            ? `${activeTrack.label} (${activeTrack.getSettings().sampleRate ?? "auto"} Hz)`
-            : selectedDeviceId
-              ? `Device ${selectedDeviceId.slice(0, 8)}...`
-              : "Selected Audio Input",
-        );
-      }
+      const activeTrack = stream.getAudioTracks()[0];
+      setActiveDeviceName(
+        activeTrack.label
+          ? `${activeTrack.label} (${activeTrack.getSettings().sampleRate ?? "auto"} Hz)`
+          : selectedDeviceId
+            ? `Device ${selectedDeviceId.slice(0, 8)}...`
+            : "Selected Audio Input",
+      );
 
       streamRef.current = stream;
       recordingStartedAtRef.current = Date.now();
@@ -860,38 +843,23 @@ export default function SessionScreen() {
               <CardContent className="p-4 space-y-4">
                 <div>
                   <label className="block text-sm text-muted-foreground mb-2">
-                    Capture Mode
+                    Audio Input Device
                   </label>
                   <select
                     className="w-full bg-background border border-border rounded-md px-3 py-2 text-white"
-                    value={audioSource}
-                    onChange={(e) => setAudioSource(e.target.value)}
+                    value={selectedDeviceId}
+                    onChange={(e) => setSelectedDeviceId(e.target.value)}
                   >
-                    <option value="input">Audio Input Device</option>
-                    <option value="system">System Audio Capture</option>
+                    {audioInputDevices.map((device) => (
+                      <option key={device.deviceId} value={device.deviceId}>
+                        {device.label}
+                      </option>
+                    ))}
                   </select>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Supports Microphone, Line In, Virtual Audio Cable, and Stereo Mix when exposed by the OS.
+                  </p>
                 </div>
-                {audioSource === "input" && (
-                  <div>
-                    <label className="block text-sm text-muted-foreground mb-2">
-                      Audio Input Device
-                    </label>
-                    <select
-                      className="w-full bg-background border border-border rounded-md px-3 py-2 text-white"
-                      value={selectedDeviceId}
-                      onChange={(e) => setSelectedDeviceId(e.target.value)}
-                    >
-                      {audioInputDevices.map((device) => (
-                        <option key={device.deviceId} value={device.deviceId}>
-                          {device.label}
-                        </option>
-                      ))}
-                    </select>
-                    <p className="mt-2 text-xs text-muted-foreground">
-                      Supports Virtual Audio Cable, Stereo Mix, Microphone, and Line In when exposed by the OS.
-                    </p>
-                  </div>
-                )}
                 <div>
                   <p className="text-sm text-muted-foreground">Active Device</p>
                   <p className="text-sm text-white">{activeDeviceName}</p>
