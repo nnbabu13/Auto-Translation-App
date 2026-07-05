@@ -149,6 +149,12 @@ export default function SessionScreen() {
     timestamp: number;
   }>>([]);
 
+  const [transcriptHistory, setTranscriptHistory] = useState<Array<{
+    text: string;
+    speaker: string | null;
+    timestamp: number;
+  }>>([]);
+
   const [audioStats, setAudioStats] = useState<AudioStats>({
     volumeLevel: 0,
     rmsLevel: 0,
@@ -198,6 +204,8 @@ export default function SessionScreen() {
   const utteranceChunkIndexRef = useRef(0);
   const lastSpeechEndTimeRef = useRef<number>(Date.now());
   const speechDensityRef = useRef({ speechFrames: 0, totalFrames: 0 });
+  const transcriptEndRef = useRef<HTMLDivElement>(null);
+  const translationEndRef = useRef<HTMLDivElement>(null);
 
   const [speechDensity, setSpeechDensity] = useState(0);
 
@@ -244,6 +252,14 @@ export default function SessionScreen() {
     }, 200);
     return () => clearInterval(interval);
   }, [isRecording]);
+
+  useEffect(() => {
+    transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [transcriptHistory.length]);
+
+  useEffect(() => {
+    translationEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [translationHistory.length]);
 
   const loadAudioDevices = useCallback(async () => {
     if (!navigator.mediaDevices?.enumerateDevices) {
@@ -495,6 +511,12 @@ export default function SessionScreen() {
         setSourceLanguage(data.sourceLanguage);
         setLatency(data.latencyMs);
         setConfidence(data.confidence);
+
+        setTranscriptHistory(prev => [...prev.slice(-19), {
+          text: data.originalText,
+          speaker: speakerName,
+          timestamp: Date.now(),
+        }]);
 
         const speakerName = data.speaker || null;
         if (data.speaker) {
@@ -1332,22 +1354,23 @@ export default function SessionScreen() {
               </CardTitle>
             </CardHeader>
             <CardContent className="p-8 flex-1 overflow-auto bg-background/50">
-              {diarizationEnabled && transcriptWithSpeakers.length > 0 ? (
+              {transcriptHistory.length > 0 ? (
                 <div className="space-y-4">
-                  {transcriptWithSpeakers.slice(-10).map((entry, idx) => (
-                    <div key={idx} className="flex items-start gap-3">
-                      <span className="text-xs text-primary font-mono mt-1">
-                        {entry.speaker || "Unknown"}
-                      </span>
+                  {transcriptHistory.map((entry, idx) => (
+                    <div key={entry.timestamp} className={idx === transcriptHistory.length - 1 ? "" : "opacity-60"}>
+                      {entry.speaker && diarizationEnabled && (
+                        <span className="text-xs text-primary font-mono block">{entry.speaker}</span>
+                      )}
                       <p className="text-2xl lg:text-3xl font-medium leading-relaxed text-muted-foreground">
                         {entry.text}
                       </p>
                     </div>
                   ))}
+                  <div ref={transcriptEndRef} />
                 </div>
               ) : (
                 <p className="text-3xl lg:text-4xl font-medium leading-relaxed text-muted-foreground">
-                  {originalText || "Waiting for audio input..."}
+                  {"Waiting for audio input..."}
                 </p>
               )}
             </CardContent>
@@ -1366,8 +1389,8 @@ export default function SessionScreen() {
             <CardContent className="p-8 flex-1 overflow-auto bg-background/50">
               {translationHistory.length > 0 ? (
                 <div className="space-y-4">
-                  {translationHistory.slice(-10).map((entry, idx) => (
-                    <div key={entry.timestamp} className={idx === 0 ? "" : "opacity-60"}>
+                  {translationHistory.map((entry, idx) => (
+                    <div key={entry.timestamp} className={idx === translationHistory.length - 1 ? "" : "opacity-60"}>
                       {entry.speaker && (
                         <span className="text-xs text-primary font-mono block">{entry.speaker}</span>
                       )}
@@ -1376,6 +1399,7 @@ export default function SessionScreen() {
                       </p>
                     </div>
                   ))}
+                  <div ref={translationEndRef} />
                 </div>
               ) : (
                 <p className="text-4xl lg:text-5xl font-bold leading-tight text-white">
