@@ -66,7 +66,7 @@ export async function createSileroVad(
       callbacks.onVADMisfire?.();
     },
     onFrameProcessed: (_probabilities: any, _frame: Float32Array) => {
-      callbacks.onFrameProcessed?.(_probabilities.speech, _frame);
+      callbacks.onFrameProcessed?.(_probabilities.isSpeech, _frame);
     },
   });
 
