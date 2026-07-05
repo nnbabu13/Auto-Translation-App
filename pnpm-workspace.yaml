@@ -148,3 +148,7 @@ overrides:
 
 allowBuilds:
   protobufjs: true
+  esbuild: true
+  '@swc/core': true
+  msw: true
+  unrs-resolver: true

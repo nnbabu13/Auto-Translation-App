@@ -1,5 +1,5 @@
 {
-  "installCommand": "rm -f pnpm-lock.yaml && npm i -g pnpm@11.9.0 && pnpm install --no-frozen-lockfile",
+  "installCommand": "rm -f pnpm-lock.yaml && npm i -g pnpm@11.9.0 && pnpm install --no-frozen-lockfile --config.confirmModulesPurge=false",
   "buildCommand": "pnpm run vercel:build",
   "outputDirectory": "artifacts/cinema-translator/dist",
   "framework": null,
