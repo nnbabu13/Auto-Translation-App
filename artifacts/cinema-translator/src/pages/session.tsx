@@ -113,6 +113,7 @@ export default function SessionScreen() {
   const [showMetricsDashboard, setShowMetricsDashboard] = useState(false);
   const [cinemaMode, setCinemaMode] = useState(false);
   const [benchmarkMode, setBenchmarkMode] = useState(false);
+  const [ttsEnabled, setTtsEnabled] = useState(true);
   const [noiseSuppression, setNoiseSuppression] = useState(false);
   const [sourceLanguageSetting, setSourceLanguageSetting] = useState<string>("en");
 
@@ -529,6 +530,7 @@ export default function SessionScreen() {
             cinemaMode,
             diarize: diarizationEnabled,
             compressionMode: useCompression,
+            skipTTS: !ttsEnabled,
             sequence,
           }),
         });
@@ -594,6 +596,7 @@ export default function SessionScreen() {
       updateRecordedChunk,
       diarizationEnabled,
       translationHistory.length,
+      ttsEnabled,
     ]
   );
 
@@ -1141,6 +1144,21 @@ export default function SessionScreen() {
                     {benchmarkMode ? "On" : "Off"}
                   </Button>
                 </div>
+                <div className="flex items-center justify-between">
+                  <label className="text-sm text-muted-foreground">
+                    Text-to-Speech
+                  </label>
+                  <Button
+                    variant="outline"
+                    className="w-16"
+                    onClick={() => setTtsEnabled(!ttsEnabled)}
+                  >
+                    {ttsEnabled ? "On" : "Off"}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Generate spoken audio for translations. Disable to reduce latency and API costs.
+                </p>
                 <div>
                   <label className="block text-sm text-muted-foreground mb-2">
                     Translation Model

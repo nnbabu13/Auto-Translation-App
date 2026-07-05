@@ -89,6 +89,7 @@ router.post("/translate/chunk", async (req, res): Promise<void> => {
     cinemaMode = false,
     diarize = false,
     compressionMode = false,
+    skipTTS = false,
   } = req.body;
   const translationModel = model || "gpt-4o";
   const startTime = Date.now();
@@ -346,37 +347,52 @@ router.post("/translate/chunk", async (req, res): Promise<void> => {
 
   let audioBase64 = "";
 
-  // Run TTS and DB insertion in parallel
-  await Promise.all([
-    (async () => {
-      try {
-        const voice = TTS_VOICE_MAP[primaryLang] ?? "alloy";
-        const ttsResponse = await openai.audio.speech.create({
-          model: "tts-1", // Fixed model from gpt-4o-mini-tts to standard tts-1
-          voice,
-          input: translatedText || " ",
-          response_format: "pcm",
-        });
-        audioBase64 = Buffer.from(await ttsResponse.arrayBuffer()).toString("base64");
-      } catch (err) {
-        console.error("TTS error:", err);
-      }
-    })(),
-    (async () => {
-      try {
-        await db.insert(translationLogsTable).values({
-          sessionId,
-          originalText,
-          translatedText,
-          sourceLanguage,
-          targetLanguage: primaryLang,
-          speaker,
-        });
-      } catch (err) {
-        console.error("DB insert error:", err);
-      }
-    })()
-  ]);
+  if (!skipTTS) {
+    // Run TTS and DB insertion in parallel
+    await Promise.all([
+      (async () => {
+        try {
+          const voice = TTS_VOICE_MAP[primaryLang] ?? "alloy";
+          const ttsResponse = await openai.audio.speech.create({
+            model: "tts-1",
+            voice,
+            input: translatedText || " ",
+            response_format: "pcm",
+          });
+          audioBase64 = Buffer.from(await ttsResponse.arrayBuffer()).toString("base64");
+        } catch (err) {
+          console.error("TTS error:", err);
+        }
+      })(),
+      (async () => {
+        try {
+          await db.insert(translationLogsTable).values({
+            sessionId,
+            originalText,
+            translatedText,
+            sourceLanguage,
+            targetLanguage: primaryLang,
+            speaker,
+          });
+        } catch (err) {
+          console.error("DB insert error:", err);
+        }
+      })()
+    ]);
+  } else {
+    try {
+      await db.insert(translationLogsTable).values({
+        sessionId,
+        originalText,
+        translatedText,
+        sourceLanguage,
+        targetLanguage: primaryLang,
+        speaker,
+      });
+    } catch (err) {
+      console.error("DB insert error:", err);
+    }
+  }
 
   ttsLatencyMs = Date.now() - ttsStartTime;
   const latencyMs = Date.now() - startTime;
