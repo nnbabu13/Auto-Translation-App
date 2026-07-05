@@ -6,7 +6,7 @@ export interface SileroVadCallbacks {
   onSpeechStart: () => void;
   onSpeechEnd: (audio: Float32Array) => void;
   onVADMisfire?: () => void;
-  onFrameProcessed?: (probability: number) => void;
+  onFrameProcessed?: (probability: number, frame: Float32Array) => void;
 }
 
 export interface SileroVadOptions {
@@ -66,7 +66,7 @@ export async function createSileroVad(
       callbacks.onVADMisfire?.();
     },
     onFrameProcessed: (_probabilities: any, _frame: Float32Array) => {
-      callbacks.onFrameProcessed?.(_probabilities.speech);
+      callbacks.onFrameProcessed?.(_probabilities.speech, _frame);
     },
   });
 

@@ -836,55 +836,18 @@ export default function SessionScreen() {
           onSpeechStart: () => {
             setListeningActive(true);
           },
-          onSpeechEnd: async (audio: Float32Array) => {
+          onSpeechEnd: async (_audio: Float32Array) => {
             const SAMPLE_RATE = 16000;
-            const density = speechDensityRef.current;
-            const currentDensity = density.totalFrames > 0
-              ? density.speechFrames / density.totalFrames
-              : 0.5;
-            const adaptiveMaxMs = currentDensity > 0.8 ? 4000 : 6000;
-            const maxChunkSamples = Math.floor(SAMPLE_RATE * (adaptiveMaxMs / 1000));
-
-            let offset = 0;
-            while (offset < audio.length) {
-              const chunkLen = Math.min(maxChunkSamples, audio.length - offset);
-              const subChunk = audio.slice(offset, offset + chunkLen);
-              offset += chunkLen;
-
-              const currentBuf = utteranceBufferRef.current;
-              utteranceBufferRef.current = concatFloat32Arrays(currentBuf, subChunk);
-
-              if (utteranceStartTimeRef.current === 0) {
-                utteranceStartTimeRef.current = Date.now();
-              }
-
-              vadAcceptedCount++;
-
-              const totalDurationMs = (utteranceBufferRef.current.length / SAMPLE_RATE) * 1000;
-              setUtteranceDurationMs(Math.round(totalDurationMs));
-              setPendingBufferSizeMs(Math.round(totalDurationMs));
-
-              if (totalDurationMs >= 12000) {
-                await flushUtteranceRef.current();
-                continue;
-              }
-
-              if (totalDurationMs >= adaptiveMaxMs) {
-                await flushUtteranceRef.current();
-                continue;
-              }
-            }
-
             lastSpeechEndTimeRef.current = Date.now();
             lastFlushTimeRef.current = Date.now();
 
             const remainingMs = (utteranceBufferRef.current.length / SAMPLE_RATE) * 1000;
-            if (remainingMs >= 3000) {
+            if (remainingMs >= 1500) {
               await flushUtteranceRef.current();
             }
           },
           onVADMisfire: () => {},
-          onFrameProcessed: (probability: number) => {
+          onFrameProcessed: (probability: number, frame: Float32Array) => {
             setAudioStats((prev) => ({
               ...prev,
               speechProbability: probability,
@@ -897,8 +860,14 @@ export default function SessionScreen() {
               density.speechFrames++;
             }
 
-            const bufLen = utteranceBufferRef.current.length;
-            if (bufLen > 0 && Date.now() - lastFlushTimeRef.current > 6000) {
+            if (probability >= 0.10) {
+              utteranceBufferRef.current = concatFloat32Arrays(utteranceBufferRef.current, frame);
+              if (utteranceStartTimeRef.current === 0) {
+                utteranceStartTimeRef.current = Date.now();
+              }
+            }
+
+            if (utteranceBufferRef.current.length > 0 && Date.now() - lastFlushTimeRef.current > 6000) {
               flushUtteranceRef.current();
             }
           },
