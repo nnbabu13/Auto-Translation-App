@@ -47,6 +47,7 @@ export async function createSileroVad(
     minSpeechMs,
     preSpeechPadMs,
     baseAssetPath: "/",
+    onnxWASMBasePath: "/",
     ...(stream ? { getStream: () => Promise.resolve(stream) } : {}),
     ...(audioContext ? { audioContext } : {}),
     ortConfig: (ort) => {
