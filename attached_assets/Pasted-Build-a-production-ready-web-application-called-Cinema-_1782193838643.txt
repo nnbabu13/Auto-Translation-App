@@ -1,0 +1,243 @@
+Build a production-ready web application called **Cinema AI Translator**.
+
+## Objective
+
+Create a web application that provides near real-time translation of movie audio into a user-selected language.
+
+Primary use case:
+
+A censorship board member or reviewer sits in a cinema wearing headphones. The application listens to the movie audio through the device microphone, automatically detects the spoken language, translates the dialogue into the selected target language, generates translated speech, and plays it through connected headphones.
+
+The application should work entirely through a web browser.
+
+---
+
+## Technology Stack
+
+Frontend:
+
+* Next.js 15
+* React
+* TypeScript
+* Tailwind CSS
+* shadcn/ui
+
+Backend:
+
+* Next.js API Routes
+* Server Actions where appropriate
+
+AI Services:
+
+* OpenAI Speech-to-Text
+* OpenAI Translation
+* OpenAI Text-to-Speech
+
+Deployment:
+
+* Vercel
+
+---
+
+## Core Features
+
+### Authentication
+
+Simple email login.
+
+Users can:
+
+* Sign up
+* Login
+* Logout
+
+Store user profiles.
+
+---
+
+### Dashboard
+
+Show:
+
+* User name
+* Available translation sessions
+* Create new session button
+* Session history
+
+---
+
+### Create Translation Session
+
+Fields:
+
+* Session Name
+* Target Language
+
+Languages:
+
+* Greek
+* English
+* Hindi
+* Telugu
+* Russian
+* German
+* French
+* Arabic
+
+Button:
+
+Create Session
+
+---
+
+### Translation Screen
+
+Dark mode optimized for cinema use.
+
+Display:
+
+Large Start Button
+
+Large Stop Button
+
+Status Indicators:
+
+* Listening
+* Processing
+* Translating
+* Speaking
+
+Live Transcript Panel
+
+Shows original detected speech.
+
+Example:
+
+"Welcome to our city."
+
+Live Translation Panel
+
+Shows translated text.
+
+Example:
+
+"Καλώς ήρθατε στην πόλη μας."
+
+Latency Indicator
+
+Example:
+
+Current Delay: 3.2 seconds
+
+Detected Language Indicator
+
+Example:
+
+Detected Language: English
+
+Audio Output Indicator
+
+Example:
+
+Headphones Connected
+
+---
+
+### Audio Processing Workflow
+
+When user presses START:
+
+1. Request microphone permission.
+2. Begin continuous audio capture.
+3. Record audio in 5-second chunks.
+4. Upload chunk to backend.
+5. Send audio to OpenAI speech recognition.
+6. Automatically detect spoken language.
+7. Convert speech to text.
+8. Translate transcript into selected target language.
+9. Generate translated speech using OpenAI TTS.
+10. Stream generated speech back to browser.
+11. Play translated audio through browser output device.
+12. Continue processing next chunk automatically.
+
+---
+
+### Continuous Translation Loop
+
+The system should continuously process:
+
+Audio Chunk
+→ Transcript
+→ Translation
+→ Speech
+→ Playback
+
+until user presses STOP.
+
+---
+
+### Session Logging
+
+Store:
+
+* Original transcript
+* Translated text
+* Timestamp
+* Source language
+* Target language
+* Session ID
+
+Allow users to export session logs.
+
+Export formats:
+
+* TXT
+* PDF
+
+---
+
+### UI Requirements
+
+Cinema-friendly design.
+
+Requirements:
+
+* Large buttons
+* High contrast dark theme
+* Large text
+* Mobile responsive
+* Tablet responsive
+* Desktop responsive
+
+Use modern SaaS design style.
+
+---
+
+### Error Handling
+
+Handle:
+
+* No microphone permission
+* No internet connection
+* API failures
+* Empty audio
+* Unsupported language
+
+Show friendly error messages.
+
+---
+
+### Future Ready Architecture
+
+Design codebase so future features can be added:
+
+* Real-time streaming translation
+* Multiple listeners
+* Bluetooth headset management
+* Theatre subscription plans
+* Live subtitle generation
+* Mobile applications
+
+Create clean folder structure and production-quality code.
+
+Generate all pages, components, API routes, database schema, hooks, utilities, environment variables, and setup instructions required to run the application locally.
