@@ -137,11 +137,17 @@ export default function SessionScreen() {
   const [diarizationEnabled, setDiarizationEnabled] = useState(false);
   const [currentSpeaker, setCurrentSpeaker] = useState<string | null>(null);
   const [transcriptWithSpeakers, setTranscriptWithSpeakers] = useState<{speaker: string | null; text: string; timestamp: number}[]>([]);
-  const [translationQueueLength, setTranslationQueueLength] = useState(0);
 
   const [utteranceDurationMs, setUtteranceDurationMs] = useState(0);
   const [silenceDurationMs, setSilenceDurationMs] = useState(0);
   const [pendingBufferSizeMs, setPendingBufferSizeMs] = useState(0);
+
+  const [translationHistory, setTranslationHistory] = useState<Array<{
+    original: string;
+    translated: string;
+    speaker: string | null;
+    timestamp: number;
+  }>>([]);
 
   const [audioStats, setAudioStats] = useState<AudioStats>({
     volumeLevel: 0,
@@ -185,7 +191,6 @@ export default function SessionScreen() {
   const translationsRef = useRef<string[]>([]);
   const segmentsRef = useRef<Blob[]>([]);
   const transcriptHistoryRef = useRef<{ text: string; timestamp: number }[]>([]);
-  const translationDisplayQueueRef = useRef<Array<{ original: string; translated: string; speaker: string | null }>>([]);
 
   const utteranceBufferRef = useRef<Float32Array>(new Float32Array(0));
   const utteranceStartTimeRef = useRef<number>(0);
@@ -507,12 +512,13 @@ export default function SessionScreen() {
           primaryTranslation = translations[session.targetLanguage] || data.translatedText;
         }
 
-        translationDisplayQueueRef.current.push({
+        setTranslatedText(primaryTranslation);
+        setTranslationHistory(prev => [...prev.slice(-20), {
           original: data.originalText,
           translated: primaryTranslation,
           speaker: speakerName,
-        });
-        setTranslationQueueLength(translationDisplayQueueRef.current.length);
+          timestamp: Date.now(),
+        }]);
         
         updateRecordedChunk(chunkNumber, {
           transcriptionResult: data.originalText,
@@ -684,7 +690,7 @@ export default function SessionScreen() {
             const currentDensity = density.totalFrames > 0
               ? density.speechFrames / density.totalFrames
               : 0.5;
-            const adaptiveMaxMs = currentDensity > 0.8 ? 5000 : 8000;
+            const adaptiveMaxMs = currentDensity > 0.8 ? 4000 : 6000;
             const maxChunkSamples = Math.floor(SAMPLE_RATE * (adaptiveMaxMs / 1000));
 
             let offset = 0;
@@ -820,26 +826,6 @@ export default function SessionScreen() {
       stopRecording();
     };
   }, [stopRecording]);
-
-  useEffect(() => {
-    let timeoutId: ReturnType<typeof setTimeout>;
-    const processNext = () => {
-      const queue = translationDisplayQueueRef.current;
-      if (queue.length > 0) {
-        const next = queue.shift()!;
-        setTranslatedText(next.translated);
-        if (next.speaker) {
-          setCurrentSpeaker(next.speaker);
-        }
-        setTranslationQueueLength(queue.length);
-        const charCount = next.translated.length;
-        const delayMs = Math.min(2000, Math.max(1000, charCount * 15));
-        timeoutId = setTimeout(processNext, delayMs);
-      }
-    };
-    timeoutId = setTimeout(processNext, 100);
-    return () => clearTimeout(timeoutId);
-  }, []);
 
   if (isLoading || !session) {
     return (
@@ -1378,13 +1364,23 @@ export default function SessionScreen() {
               </CardTitle>
             </CardHeader>
             <CardContent className="p-8 flex-1 overflow-auto bg-background/50">
-              <p className="text-4xl lg:text-5xl font-bold leading-tight text-white">
-                {translatedText || "Translation will appear here..."}
-              </p>
-              {translationQueueLength > 0 && (
-                <div className="mt-3 text-sm text-muted-foreground animate-pulse">
-                  {translationQueueLength} more translation{translationQueueLength > 1 ? "s" : ""} queued...
+              {translationHistory.length > 0 ? (
+                <div className="space-y-4">
+                  {translationHistory.slice(-10).map((entry, idx) => (
+                    <div key={entry.timestamp} className={idx === 0 ? "" : "opacity-60"}>
+                      {entry.speaker && (
+                        <span className="text-xs text-primary font-mono block">{entry.speaker}</span>
+                      )}
+                      <p className="text-4xl lg:text-5xl font-bold leading-tight text-white">
+                        {entry.translated}
+                      </p>
+                    </div>
+                  ))}
                 </div>
+              ) : (
+                <p className="text-4xl lg:text-5xl font-bold leading-tight text-white">
+                  {"Translation will appear here..."}
+                </p>
               )}
               {session.targetLanguages && session.targetLanguages.length > 1 && (
                 <div className="mt-4 text-sm text-muted-foreground">
