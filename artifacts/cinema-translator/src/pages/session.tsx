@@ -862,6 +862,7 @@ export default function SessionScreen() {
             }
 
             lastSpeechEndTimeRef.current = Date.now();
+            lastFlushTimeRef.current = Date.now();
 
             const remainingMs = (utteranceBufferRef.current.length / SAMPLE_RATE) * 1000;
             if (remainingMs >= 3000) {
@@ -883,14 +884,19 @@ export default function SessionScreen() {
             }
 
             const bufLen = utteranceBufferRef.current.length;
-            if (bufLen > 0 && Date.now() - lastFlushTimeRef.current > 8000) {
-              flushUtteranceRef.current();
+            if (Date.now() - lastFlushTimeRef.current > 6000) {
+              if (bufLen > 0) {
+                flushUtteranceRef.current();
+              } else if (vadRef.current) {
+                vadRef.current.pause();
+                vadRef.current.start();
+              }
             }
           },
         },
         {
           positiveSpeechThreshold: 0.3,
-          negativeSpeechThreshold: 0.10,
+          negativeSpeechThreshold: 0.25,
           redemptionMs: 1500,
           minSpeechMs: 0,
           preSpeechPadMs: 400,
