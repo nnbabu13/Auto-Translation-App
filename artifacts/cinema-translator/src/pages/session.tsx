@@ -207,7 +207,31 @@ export default function SessionScreen() {
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const translationEndRef = useRef<HTMLDivElement>(null);
 
+  const sequenceCounterRef = useRef(0);
+  const nextExpectedSequenceRef = useRef(1);
+  const pendingResultsRef = useRef<Map<number, {
+    sequence: number;
+    originalText: string;
+    translatedText: string;
+    sourceLanguage: string;
+    speaker: string | null;
+    audioBase64: string;
+    latencyMs: number;
+    sttLatencyMs: number;
+    translationLatencyMs: number;
+    ttsLatencyMs: number;
+    confidence: number;
+    chunkNumber: number;
+    chunkRecord: any;
+  }>>(new Map());
+  const activeRequestsRef = useRef(0);
+  const requestQueueRef = useRef<Array<{blob: Blob; chunkNumber: number; stats: AudioStats}>>([]);
+  const playbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const skippedCountRef = useRef(0);
+
   const [speechDensity, setSpeechDensity] = useState(0);
+  const [skippedChunks, setSkippedChunks] = useState(0);
+  const [currentPlaybackRate, setCurrentPlaybackRate] = useState(1.0);
 
   const captureWarnings = useMemo(() => {
     const warnings: string[] = [];
@@ -432,7 +456,7 @@ export default function SessionScreen() {
   const processChunk = useCallback(
     async (blob: Blob, index: number, stats: AudioStats) => {
       if (!stats.speechDetected || !session) return;
-      setProcessingCount((c) => c + 1);
+
       const chunkNumber = index + 1;
       const createdAt = Date.now();
       const sessionOffsetMs = recordingStartedAtRef.current
@@ -452,6 +476,14 @@ export default function SessionScreen() {
         translationResult: "",
       };
 
+      if (activeRequestsRef.current >= 4) {
+        requestQueueRef.current.push({ blob, chunkNumber, stats });
+        return;
+      }
+
+      const sequence = ++sequenceCounterRef.current;
+      activeRequestsRef.current++;
+
       try {
         segmentsRef.current.push(blob);
         lastRecordedChunkRef.current = blob;
@@ -470,6 +502,8 @@ export default function SessionScreen() {
           .filter((entry) => nowMs - entry.timestamp < contextWindowMs)
           .map((entry) => entry.text);
 
+        const useCompression = translationHistory.length > 8;
+
         const response = await fetch("/api/translate/chunk", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -487,6 +521,8 @@ export default function SessionScreen() {
             benchmarkMode,
             cinemaMode,
             diarize: diarizationEnabled,
+            compressionMode: useCompression,
+            sequence,
           }),
         });
 
@@ -502,88 +538,42 @@ export default function SessionScreen() {
           return;
         }
 
-        setPreviousOriginalText(originalText);
-        transcriptRef.current.push(data.originalText);
-        translationsRef.current.push(data.translatedText);
-        transcriptHistoryRef.current.push({ text: data.originalText, timestamp: Date.now() });
-
-        setOriginalText(data.originalText);
-        setSourceLanguage(data.sourceLanguage);
-        setLatency(data.latencyMs);
-        setConfidence(data.confidence);
-
-        setTranscriptHistory(prev => [...prev.slice(-19), {
-          text: data.originalText,
-          speaker: speakerName,
-          timestamp: Date.now(),
-        }]);
-
-        const speakerName = data.speaker || null;
-        if (data.speaker) {
-          setCurrentSpeaker(data.speaker);
-          setTranscriptWithSpeakers(prev => [...prev.slice(-30), {
-            speaker: data.speaker,
-            text: data.originalText,
-            timestamp: Date.now()
-          }]);
-        }
-
         let primaryTranslation = data.translatedText;
         if (data.translations) {
           const translations = data.translations as Record<string, string>;
           primaryTranslation = translations[session.targetLanguage] || data.translatedText;
         }
 
-        setTranslatedText(primaryTranslation);
-        setTranslationHistory(prev => [...prev.slice(-20), {
-          original: data.originalText,
-          translated: primaryTranslation,
-          speaker: speakerName,
-          timestamp: Date.now(),
-        }]);
-        
+        pendingResultsRef.current.set(sequence, {
+          sequence,
+          originalText: data.originalText,
+          translatedText: primaryTranslation,
+          sourceLanguage: data.sourceLanguage,
+          speaker: data.speaker || null,
+          audioBase64: data.audioBase64 || "",
+          latencyMs: data.latencyMs,
+          sttLatencyMs: data.sttLatencyMs || 0,
+          translationLatencyMs: data.translationLatencyMs || 0,
+          ttsLatencyMs: data.ttsLatencyMs || 0,
+          confidence: data.confidence,
+          chunkNumber,
+          chunkRecord,
+        });
+
         updateRecordedChunk(chunkNumber, {
           transcriptionResult: data.originalText,
-          translationResult: data.translatedText,
+          translationResult: primaryTranslation,
         });
 
-        setDebugMetrics((prev) => {
-          const newTotalLatency = prev.totalLatency + data.latencyMs;
-          const newSttRequests = prev.sttRequests + 1;
-          return {
-            ...prev,
-            recordedChunks: prev.recordedChunks + 1,
-            sttRequests: newSttRequests,
-            translationRequests: prev.translationRequests + 1,
-            ttsRequests: data.audioBase64 ? prev.ttsRequests + 1 : prev.ttsRequests,
-            totalLatency: newTotalLatency,
-            avgLatency: newTotalLatency / newSttRequests,
-            sttLatency: prev.sttLatency + (data.sttLatencyMs || 0),
-            translationLatency: prev.translationLatency + (data.translationLatencyMs || 0),
-            ttsLatency: prev.ttsLatency + (data.ttsLatencyMs || 0),
-          };
-        });
-
-        if (data.audioBase64 && queueManagerRef.current) {
-          queueManagerRef.current.addToPlaybackQueue({
-            chunkId: Date.now(),
-            originalText: data.originalText,
-            translatedText: data.translatedText,
-            sourceLanguage: data.sourceLanguage,
-            audioBase64: data.audioBase64,
-            latencyMs: data.latencyMs,
-          });
-          setAudioQueueLength(queueManagerRef.current.getPlaybackQueueLength());
-          setEstimatedWaitMs(queueManagerRef.current.getEstimatedWaitMs());
-        }
+        tryPlayNextRef.current();
       } catch (err) {
         console.error("Processing error:", err);
       } finally {
-        setProcessingCount((c) => Math.max(0, c - 1));
+        activeRequestsRef.current--;
+        processQueuedRequestsRef.current();
       }
     },
     [
-      originalText,
       previousOriginalText,
       sourceLanguageSetting,
       session,
@@ -593,11 +583,135 @@ export default function SessionScreen() {
       playCapturedChunk,
       testMode,
       updateRecordedChunk,
+      diarizationEnabled,
+      translationHistory.length,
     ]
   );
 
   const processChunkRef = useRef(processChunk);
   processChunkRef.current = processChunk;
+
+  const tryPlayNext = useCallback(() => {
+    const nextSeq = nextExpectedSequenceRef.current;
+    const result = pendingResultsRef.current.get(nextSeq);
+
+    if (playbackTimeoutRef.current) {
+      clearTimeout(playbackTimeoutRef.current);
+      playbackTimeoutRef.current = null;
+    }
+
+    if (!result) {
+      playbackTimeoutRef.current = setTimeout(() => {
+        console.warn(`Skipping sequence ${nextSeq} after 5000ms timeout`);
+        skippedCountRef.current++;
+        setSkippedChunks(skippedCountRef.current);
+        nextExpectedSequenceRef.current++;
+        pendingResultsRef.current.delete(nextSeq);
+        tryPlayNextRef.current();
+      }, 5000);
+      return;
+    }
+
+    pendingResultsRef.current.delete(nextSeq);
+    nextExpectedSequenceRef.current++;
+
+    setPreviousOriginalText(result.originalText);
+    transcriptRef.current.push(result.originalText);
+    translationsRef.current.push(result.translatedText);
+    transcriptHistoryRef.current.push({ text: result.originalText, timestamp: Date.now() });
+
+    setOriginalText(result.originalText);
+    setSourceLanguage(result.sourceLanguage);
+    setLatency(result.latencyMs);
+    setConfidence(result.confidence);
+
+    setTranscriptHistory(prev => [...prev.slice(-19), {
+      text: result.originalText,
+      speaker: result.speaker,
+      timestamp: Date.now(),
+    }]);
+
+    if (result.speaker) {
+      setCurrentSpeaker(result.speaker);
+      setTranscriptWithSpeakers(prev => [...prev.slice(-30), {
+        speaker: result.speaker,
+        text: result.originalText,
+        timestamp: Date.now()
+      }]);
+    }
+
+    setTranslatedText(result.translatedText);
+    setTranslationHistory(prev => [...prev.slice(-20), {
+      original: result.originalText,
+      translated: result.translatedText,
+      speaker: result.speaker,
+      timestamp: Date.now(),
+    }]);
+
+    setDebugMetrics((prev) => {
+      const newTotalLatency = prev.totalLatency + result.latencyMs;
+      const newSttRequests = prev.sttRequests + 1;
+      return {
+        ...prev,
+        recordedChunks: prev.recordedChunks + 1,
+        sttRequests: newSttRequests,
+        translationRequests: prev.translationRequests + 1,
+        ttsRequests: result.audioBase64 ? prev.ttsRequests + 1 : prev.ttsRequests,
+        totalLatency: newTotalLatency,
+        avgLatency: newTotalLatency / newSttRequests,
+        sttLatency: prev.sttLatency + result.sttLatencyMs,
+        translationLatency: prev.translationLatency + result.translationLatencyMs,
+        ttsLatency: prev.ttsLatency + result.ttsLatencyMs,
+      };
+    });
+
+    if (result.audioBase64 && queueManagerRef.current) {
+      const qLen = queueManagerRef.current.getPlaybackQueueLength();
+      if (qLen > 15) {
+        queueManagerRef.current.setPlaybackRate(1.15);
+      } else if (qLen > 10) {
+        queueManagerRef.current.setPlaybackRate(1.1);
+      } else if (qLen > 5) {
+        queueManagerRef.current.setPlaybackRate(1.05);
+      } else {
+        queueManagerRef.current.setPlaybackRate(1.0);
+      }
+      setCurrentPlaybackRate(queueManagerRef.current.getPlaybackRate());
+
+      queueManagerRef.current.addToPlaybackQueue({
+        chunkId: Date.now(),
+        originalText: result.originalText,
+        translatedText: result.translatedText,
+        sourceLanguage: result.sourceLanguage,
+        audioBase64: result.audioBase64,
+        latencyMs: result.latencyMs,
+      });
+      setAudioQueueLength(queueManagerRef.current.getPlaybackQueueLength());
+      setEstimatedWaitMs(queueManagerRef.current.getEstimatedWaitMs());
+    }
+
+    setProcessingCount(activeRequestsRef.current + requestQueueRef.current.length);
+
+    if (pendingResultsRef.current.has(nextExpectedSequenceRef.current)) {
+      tryPlayNextRef.current();
+    }
+  }, []);
+
+  const tryPlayNextRef = useRef(tryPlayNext);
+  tryPlayNextRef.current = tryPlayNext;
+
+  const processQueuedRequests = useCallback(() => {
+    while (
+      requestQueueRef.current.length > 0 &&
+      activeRequestsRef.current < 4
+    ) {
+      const next = requestQueueRef.current.shift()!;
+      processChunkRef.current(next.blob, next.chunkNumber, next.stats);
+    }
+  }, []);
+
+  const processQueuedRequestsRef = useRef(processQueuedRequests);
+  processQueuedRequestsRef.current = processQueuedRequests;
 
   const flushUtterance = useCallback(async () => {
     const buffer = utteranceBufferRef.current;
@@ -1453,6 +1567,40 @@ export default function SessionScreen() {
               <p className="text-2xl font-bold">
                 {debugMetrics.avgLatency.toFixed(0)}ms
               </p>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
+            <div>
+              <p className="text-sm text-muted-foreground">Active Requests</p>
+              <p className="text-2xl font-bold text-cyan-500">{activeRequestsRef.current}/4</p>
+            </div>
+            <div>
+              <p className="text-sm text-muted-foreground">Queued Requests</p>
+              <p className="text-2xl font-bold text-yellow-500">{requestQueueRef.current.length}</p>
+            </div>
+            <div>
+              <p className="text-sm text-muted-foreground">Pending Results</p>
+              <p className="text-2xl font-bold text-orange-500">{pendingResultsRef.current.size}</p>
+            </div>
+            <div>
+              <p className="text-sm text-muted-foreground">Skipped Chunks</p>
+              <p className="text-2xl font-bold text-red-500">{skippedChunks}</p>
+            </div>
+            <div>
+              <p className="text-sm text-muted-foreground">Next Expected Seq</p>
+              <p className="text-2xl font-bold text-green-500">{nextExpectedSequenceRef.current}</p>
+            </div>
+            <div>
+              <p className="text-sm text-muted-foreground">Playback Rate</p>
+              <p className="text-2xl font-bold text-purple-500">{currentPlaybackRate.toFixed(2)}x</p>
+            </div>
+            <div>
+              <p className="text-sm text-muted-foreground">Compression</p>
+              <p className="text-2xl font-bold text-emerald-500">{translationHistory.length > 8 ? "ON" : "OFF"}</p>
+            </div>
+            <div>
+              <p className="text-sm text-muted-foreground">Total Sequences</p>
+              <p className="text-2xl font-bold text-blue-500">{sequenceCounterRef.current}</p>
             </div>
           </div>
           <div className="mt-6 space-y-3">

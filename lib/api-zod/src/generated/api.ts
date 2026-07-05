@@ -215,7 +215,9 @@ export const TranslateChunkBody = zod.object({
   "model": zod.string().optional(),
   "benchmarkMode": zod.boolean().optional(),
   "cinemaMode": zod.boolean().optional(),
-  "diarize": zod.boolean().optional()
+  "diarize": zod.boolean().optional(),
+  "compressionMode": zod.boolean().optional(),
+  "sequence": zod.number().optional()
 })
 
 export const TranslateChunkResponse = zod.object({

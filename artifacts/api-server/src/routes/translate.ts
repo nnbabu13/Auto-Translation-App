@@ -88,6 +88,7 @@ router.post("/translate/chunk", async (req, res): Promise<void> => {
     sttModel = "nova-3",
     cinemaMode = false,
     diarize = false,
+    compressionMode = false,
   } = req.body;
   const translationModel = model || "gpt-4o";
   const startTime = Date.now();
@@ -276,6 +277,7 @@ router.post("/translate/chunk", async (req, res): Promise<void> => {
         `Preserve names, places, emotional tone, and movie terminology.`,
         `Use the context from previous translations to maintain consistency.`,
         cinemaMode ? `Prioritize accuracy over speed. Use formal register when appropriate.` : "",
+        compressionMode ? `Translate concisely. Remove filler words (um, uh, well, like, you know, I mean). Keep essential meaning only. Shorter is better.` : "",
       ].filter(Boolean).join(" "),
     },
   ];

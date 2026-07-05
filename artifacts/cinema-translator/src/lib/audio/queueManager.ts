@@ -28,6 +28,7 @@ export class QueueManager {
   private playbackQueue: TranslationResult[] = [];
   private isProcessingPlayback = false;
   private chunkCounter = 0;
+  private playbackRate = 1.0;
 
   constructor() {}
 
@@ -124,6 +125,7 @@ export class QueueManager {
 
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
+      source.playbackRate.value = this.playbackRate;
       source.connect(ctx.destination);
       await new Promise<void>((resolve) => {
         source.onended = () => resolve();
@@ -149,6 +151,14 @@ export class QueueManager {
       }
     }
     return (totalSamples / SAMPLE_RATE) * 1000;
+  }
+
+  setPlaybackRate(rate: number) {
+    this.playbackRate = Math.max(1.0, Math.min(1.15, rate));
+  }
+
+  getPlaybackRate() {
+    return this.playbackRate;
   }
 
   getNextChunkId() {

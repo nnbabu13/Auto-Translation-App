@@ -119,6 +119,8 @@ export interface ChunkInput {
   benchmarkMode?: boolean;
   cinemaMode?: boolean;
   diarize?: boolean;
+  compressionMode?: boolean;
+  sequence?: number;
 }
 
 export interface ChunkResult {
