@@ -28,11 +28,11 @@ export async function createSileroVad(
   options: SileroVadOptions = {},
 ): Promise<MicVAD> {
   const {
-    positiveSpeechThreshold = 0.5,
-    negativeSpeechThreshold = 0.35,
-    redemptionMs = 500,
-    minSpeechMs = 250,
-    preSpeechPadMs = 30,
+    positiveSpeechThreshold = 0.3,
+    negativeSpeechThreshold = 0.25,
+    redemptionMs = 1400,
+    minSpeechMs = 400,
+    preSpeechPadMs = 800,
     model = "v5",
     stream,
     audioContext,
