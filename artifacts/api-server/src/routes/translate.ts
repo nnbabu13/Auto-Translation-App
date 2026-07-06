@@ -1,6 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db, translationLogsTable, translationSessionsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
+import { synthesizeSpeech, hasPiperVoice } from "../lib/piperTts";
 
 const router: IRouter = Router();
 const MIN_CONFIDENCE = 0.3;
@@ -352,14 +353,22 @@ router.post("/translate/chunk", async (req, res): Promise<void> => {
     await Promise.all([
       (async () => {
         try {
-          const voice = TTS_VOICE_MAP[primaryLang] ?? "alloy";
-          const ttsResponse = await openai.audio.speech.create({
-            model: "tts-1",
-            voice,
-            input: translatedText || " ",
-            response_format: "pcm",
-          });
-          audioBase64 = Buffer.from(await ttsResponse.arrayBuffer()).toString("base64");
+          if (hasPiperVoice(primaryLang)) {
+            const wavBuffer = await synthesizeSpeech(translatedText || " ", primaryLang);
+            if (wavBuffer) {
+              audioBase64 = wavBuffer.toString("base64");
+            }
+          } else {
+            // Fallback to OpenAI TTS
+            const voice = TTS_VOICE_MAP[primaryLang] ?? "alloy";
+            const ttsResponse = await openai.audio.speech.create({
+              model: "tts-1",
+              voice,
+              input: translatedText || " ",
+              response_format: "pcm",
+            });
+            audioBase64 = Buffer.from(await ttsResponse.arrayBuffer()).toString("base64");
+          }
         } catch (err) {
           console.error("TTS error:", err);
         }

@@ -24,6 +24,7 @@ import {
 import { type AudioStats } from "@/lib/audio/audioProcessor";
 import { QueueManager } from "@/lib/audio/queueManager";
 import { createSileroVad, destroyVad, type MicVAD } from "@/lib/audio/sileroVad";
+import { synthesizeLocal, hasLocalVoice, initPiper, downloadPiperVoice } from "@/lib/audio/piperTts";
 
 type AudioInputDevice = {
   deviceId: string;
@@ -114,6 +115,9 @@ export default function SessionScreen() {
   const [cinemaMode, setCinemaMode] = useState(false);
   const [benchmarkMode, setBenchmarkMode] = useState(false);
   const [ttsEnabled, setTtsEnabled] = useState(true);
+  const [ttsProvider, setTtsProvider] = useState<"local" | "cloud">("local");
+  const [piperReady, setPiperReady] = useState(false);
+  const [piperDownloadProgress, setPiperDownloadProgress] = useState<string>("");
   const [noiseSuppression, setNoiseSuppression] = useState(false);
   const [sourceLanguageSetting, setSourceLanguageSetting] = useState<string>("en");
 
@@ -292,6 +296,21 @@ export default function SessionScreen() {
   useEffect(() => {
     translationEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [translationHistory.length]);
+
+  useEffect(() => {
+    initPiper().then(() => {
+      setPiperReady(true);
+      if (session?.targetLanguage && hasLocalVoice(session.targetLanguage)) {
+        setPiperDownloadProgress(`Downloading ${session.targetLanguage} voice...`);
+        downloadPiperVoice(session.targetLanguage, (progress) => {
+          const pct = Math.round((progress.loaded * 100) / progress.total);
+          setPiperDownloadProgress(`Downloading ${session.targetLanguage} voice: ${pct}%`);
+        }).then(() => {
+          setPiperDownloadProgress("");
+        });
+      }
+    });
+  }, [session?.targetLanguage]);
 
   const loadAudioDevices = useCallback(async () => {
     if (!navigator.mediaDevices?.enumerateDevices) {
@@ -530,7 +549,7 @@ export default function SessionScreen() {
             cinemaMode,
             diarize: diarizationEnabled,
             compressionMode: useCompression,
-            skipTTS: !ttsEnabled,
+            skipTTS: !ttsEnabled || ttsProvider === "local",
             sequence,
           }),
         });
@@ -682,7 +701,10 @@ export default function SessionScreen() {
       };
     });
 
-    if (result.audioBase64 && queueManagerRef.current) {
+    const shouldUseLocalTTS = ttsEnabled && ttsProvider === "local" && session && hasLocalVoice(session.targetLanguage);
+    const audioForPlayback = result.audioBase64 || "";
+
+    if ((audioForPlayback || shouldUseLocalTTS) && queueManagerRef.current) {
       const qLen = queueManagerRef.current.getPlaybackQueueLength();
       if (qLen > 15) {
         queueManagerRef.current.setPlaybackRate(1.15);
@@ -695,16 +717,42 @@ export default function SessionScreen() {
       }
       setCurrentPlaybackRate(queueManagerRef.current.getPlaybackRate());
 
-      queueManagerRef.current.addToPlaybackQueue({
-        chunkId: Date.now(),
-        originalText: result.originalText,
-        translatedText: result.translatedText,
-        sourceLanguage: result.sourceLanguage,
-        audioBase64: result.audioBase64,
-        latencyMs: result.latencyMs,
-      });
-      setAudioQueueLength(queueManagerRef.current.getPlaybackQueueLength());
-      setEstimatedWaitMs(queueManagerRef.current.getEstimatedWaitMs());
+      if (shouldUseLocalTTS && !result.audioBase64 && result.translatedText && session) {
+        setSpeakingActive(true);
+        synthesizeLocal(result.translatedText, session.targetLanguage).then((wavBlob) => {
+          if (wavBlob && queueManagerRef.current) {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              const base64 = (reader.result as string).split(",")[1];
+              queueManagerRef.current!.addToPlaybackQueue({
+                chunkId: Date.now(),
+                originalText: result.originalText,
+                translatedText: result.translatedText,
+                sourceLanguage: result.sourceLanguage,
+                audioBase64: base64,
+                latencyMs: result.latencyMs,
+              });
+              setAudioQueueLength(queueManagerRef.current!.getPlaybackQueueLength());
+              setEstimatedWaitMs(queueManagerRef.current!.getEstimatedWaitMs());
+            };
+            reader.readAsDataURL(wavBlob);
+          }
+          setSpeakingActive(false);
+        }).catch(() => {
+          setSpeakingActive(false);
+        });
+      } else if (audioForPlayback) {
+        queueManagerRef.current.addToPlaybackQueue({
+          chunkId: Date.now(),
+          originalText: result.originalText,
+          translatedText: result.translatedText,
+          sourceLanguage: result.sourceLanguage,
+          audioBase64: audioForPlayback,
+          latencyMs: result.latencyMs,
+        });
+        setAudioQueueLength(queueManagerRef.current.getPlaybackQueueLength());
+        setEstimatedWaitMs(queueManagerRef.current.getEstimatedWaitMs());
+      }
     }
 
     setProcessingCount(activeRequestsRef.current + requestQueueRef.current.length);
@@ -712,7 +760,7 @@ export default function SessionScreen() {
     if (pendingResultsRef.current.has(nextExpectedSequenceRef.current)) {
       tryPlayNextRef.current();
     }
-  }, []);
+  }, [ttsProvider, ttsEnabled, session?.targetLanguage]);
 
   const tryPlayNextRef = useRef(tryPlayNext);
   tryPlayNextRef.current = tryPlayNext;
@@ -1159,6 +1207,30 @@ export default function SessionScreen() {
                 <p className="text-xs text-muted-foreground">
                   Generate spoken audio for translations. Disable to reduce latency and API costs.
                 </p>
+                {ttsEnabled && (
+                  <div>
+                    <label className="block text-sm text-muted-foreground mb-2">
+                      TTS Provider
+                    </label>
+                    <select
+                      className="w-full bg-background border border-border rounded-md px-3 py-2 text-white"
+                      value={ttsProvider}
+                      onChange={(e) => setTtsProvider(e.target.value as "local" | "cloud")}
+                    >
+                      <option value="local">Local (Piper WASM)</option>
+                      <option value="cloud">Cloud (OpenAI)</option>
+                    </select>
+                    {ttsProvider === "local" && !piperReady && (
+                      <p className="mt-1 text-xs text-yellow-500">Initializing Piper...</p>
+                    )}
+                    {piperDownloadProgress && (
+                      <p className="mt-1 text-xs text-blue-500">{piperDownloadProgress}</p>
+                    )}
+                    {ttsProvider === "local" && piperReady && !piperDownloadProgress && (
+                      <p className="mt-1 text-xs text-green-500">Piper ready - runs in browser, no API cost</p>
+                    )}
+                  </div>
+                )}
                 <div>
                   <label className="block text-sm text-muted-foreground mb-2">
                     Translation Model

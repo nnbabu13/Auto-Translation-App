@@ -220,6 +220,9 @@ importers:
 
   artifacts/cinema-translator:
     dependencies:
+      '@mintplex-labs/piper-tts-web':
+        specifier: ^1.0.4
+        version: 1.0.4(onnxruntime-web@1.27.0)
       '@ricky0123/vad-web':
         specifier: ^0.0.30
         version: 0.0.30
@@ -834,6 +837,11 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
+
+  '@mintplex-labs/piper-tts-web@1.0.4':
+    resolution: {integrity: sha512-Y24X+CJaGXoY5HFPSstHvJI6408OAtw3Pmq2OIYwpRpcwLLbgadWg8l1ODHNkgpB0Ps5fS9PAAQB60fHA3Bdag==}
+    peerDependencies:
+      onnxruntime-web: ^1.18.0
 
   '@nodelib/fs.scandir@2.1.5':
     resolution: {integrity: sha512-vq24Bq3ym5HEQm2NKCr3yXDwjc7vTsEThRDnkp2DK9p1uqLR+DHurm/NOTo0KG7HYHU7eppKZj3MyqYuMBf62g==}
@@ -3607,6 +3615,10 @@ snapshots:
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
+
+  '@mintplex-labs/piper-tts-web@1.0.4(onnxruntime-web@1.27.0)':
+    dependencies:
+      onnxruntime-web: 1.27.0
 
   '@nodelib/fs.scandir@2.1.5':
     dependencies:
