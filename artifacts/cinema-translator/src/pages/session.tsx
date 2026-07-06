@@ -151,6 +151,9 @@ export default function SessionScreen() {
   const wsRef = useRef<WebSocket | null>(null);
   const currentUtteranceIdRef = useRef<string | null>(null);
 
+  const restBufferRef = useRef<Int16Array>(new Int16Array(0));
+  const restFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const [currentPlaybackRate, setCurrentPlaybackRate] = useState(1.0);
   const [chunkCreationDelay, setChunkCreationDelay] = useState(0);
   const [playbackQueueDelay, setPlaybackQueueDelay] = useState(0);
@@ -385,6 +388,81 @@ export default function SessionScreen() {
     setProcessingCount(0);
   }, [ttsProvider, ttsEnabled, session?.targetLanguage, session]);
 
+  const flushRestBuffer = useCallback(async () => {
+    const buf = restBufferRef.current;
+    if (buf.length === 0) return;
+
+    restBufferRef.current = new Int16Array(0);
+
+    const float32 = new Float32Array(buf.length);
+    for (let i = 0; i < buf.length; i++) {
+      float32[i] = buf[i] / (buf[i] < 0 ? 0x8000 : 0x7fff);
+    }
+
+    const { encodeWavPCM16 } = await import("@/lib/audio/wavEncoder");
+    const wavBlob = encodeWavPCM16(float32, 16000);
+
+    const base64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve((reader.result as string).split(",")[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(wavBlob);
+    });
+
+    if (!session) return;
+
+    const nowMs = Date.now();
+    const contextWindowMs = cinemaMode ? 120000 : 60000;
+    const recentTranscripts = transcriptHistoryRef.current
+      .filter((entry) => nowMs - entry.timestamp < contextWindowMs)
+      .map((entry) => entry.text);
+
+    const useCompression = translationHistory.length > 8;
+
+    try {
+      const response = await fetch("/api/translate/chunk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          audio: base64,
+          audioExt: "wav",
+          targetLanguage: session.targetLanguage,
+          targetLanguages: session.targetLanguages || [session.targetLanguage],
+          sessionId: session.id,
+          previousTranscripts: recentTranscripts,
+          sourceLanguage: sourceLanguageSetting,
+          model: currentModel,
+          sttModel,
+          cinemaMode,
+          diarize: diarizationEnabled,
+          compressionMode: useCompression,
+          skipTTS: !ttsEnabled || ttsProvider === "local",
+        }),
+      });
+
+      if (!response.ok) return;
+      const data = await response.json();
+
+      if (!data.originalText) return;
+
+      handleFinalResult({
+        text: data.originalText,
+        translatedText: data.translatedText,
+        translations: data.translations,
+        sourceLanguage: data.sourceLanguage,
+        speaker: data.speaker || null,
+        audioBase64: data.audioBase64 || "",
+        confidence: data.confidence || 0,
+        sequence: Date.now(),
+        translationLatencyMs: data.translationLatencyMs || 0,
+        ttsLatencyMs: data.ttsLatencyMs || 0,
+        endToEndLatencyMs: data.latencyMs || 0,
+      });
+    } catch (err) {
+      console.error("REST flush error:", err);
+    }
+  }, [session, sourceLanguageSetting, currentModel, sttModel, cinemaMode, diarizationEnabled, translationHistory.length, ttsEnabled, ttsProvider]);
+
   const startRecording = async () => {
     if (!session || isRecording) return;
     try {
@@ -415,64 +493,88 @@ export default function SessionScreen() {
       streamRef.current = stream;
       await loadAudioDevices();
 
-      const wsUrlOverride = import.meta.env.VITE_WS_URL;
-      const protocol = location.protocol === "https:" ? "wss" : "ws";
-      const wsHost = import.meta.env.DEV ? "localhost:3000" : location.host;
-      const wsPath = `/api/stream?sessionId=${session.id}&targetLanguage=${session.targetLanguage}&sourceLanguage=${sourceLanguageSetting}&model=${currentModel}&sttModel=${sttModel}&cinemaMode=${cinemaMode}&diarize=${diarizationEnabled}&compressionMode=${translationHistory.length > 8}&skipTTS=${!ttsEnabled || ttsProvider === "local"}`;
-
-      const wsUrl = wsUrlOverride || `${protocol}://${wsHost}${wsPath}`;
-
+      let wsMode = false;
       const capture = new StreamingCapture();
       streamingCaptureRef.current = capture;
-
       capture.setStatsCallback((stats) => setAudioStats(stats));
-      await capture.start(stream, wsUrl);
 
-      const ws = capture.getWs();
-      wsRef.current = ws;
+      try {
+        const wsUrlOverride = import.meta.env.VITE_WS_URL;
+        const protocol = location.protocol === "https:" ? "wss" : "ws";
+        const wsHost = import.meta.env.DEV ? "localhost:3000" : location.host;
+        const wsPath = `/api/stream?sessionId=${session.id}&targetLanguage=${session.targetLanguage}&sourceLanguage=${sourceLanguageSetting}&model=${currentModel}&sttModel=${sttModel}&cinemaMode=${cinemaMode}&diarize=${diarizationEnabled}&compressionMode=${translationHistory.length > 8}&skipTTS=${!ttsEnabled || ttsProvider === "local"}`;
 
-      if (!ws) {
-        throw new Error("WebSocket not available after start");
-      }
+        const wsUrl = wsUrlOverride || `${protocol}://${wsHost}${wsPath}`;
 
-      ws.addEventListener("message", (event) => {
-        const msg = JSON.parse(event.data as string);
-        switch (msg.type) {
-          case "interim":
-            currentUtteranceIdRef.current = msg.utteranceId;
-            setInterimText(msg.text);
-            setUtteranceId(msg.utteranceId);
-            break;
+        await capture.start(stream, wsUrl);
 
-          case "final":
-            setInterimText("");
-            currentUtteranceIdRef.current = null;
-            setUtteranceId(null);
-            handleFinalResult(msg);
-            break;
+        const ws = capture.getWs();
+        wsRef.current = ws;
 
-          case "utteranceEnd":
-            currentUtteranceIdRef.current = null;
-            setUtteranceId(null);
-            break;
-
-          case "error":
-            setDeepgramError(msg.message);
-            break;
+        if (!ws) {
+          throw new Error("WebSocket not available after start");
         }
-      });
 
-      ws.addEventListener("open", () => {
+        ws.addEventListener("message", (event) => {
+          const msg = JSON.parse(event.data as string);
+          switch (msg.type) {
+            case "interim":
+              currentUtteranceIdRef.current = msg.utteranceId;
+              setInterimText(msg.text);
+              setUtteranceId(msg.utteranceId);
+              break;
+
+            case "final":
+              setInterimText("");
+              currentUtteranceIdRef.current = null;
+              setUtteranceId(null);
+              handleFinalResult(msg);
+              break;
+
+            case "utteranceEnd":
+              currentUtteranceIdRef.current = null;
+              setUtteranceId(null);
+              break;
+
+            case "error":
+              setDeepgramError(msg.message);
+              break;
+          }
+        });
+
+        ws.addEventListener("open", () => {
+          setWsConnected(true);
+        });
+
+        ws.addEventListener("close", () => {
+          setWsConnected(false);
+        });
+
+        wsMode = true;
         setWsConnected(true);
-      });
+      } catch (wsErr) {
+        const msg = String(wsErr);
+        if (!msg.includes("WebSocket")) throw wsErr;
 
-      ws.addEventListener("close", () => {
-        setWsConnected(false);
-      });
+        console.warn("WebSocket unavailable, falling back to REST mode");
+        await capture.startRest(stream, (chunk) => {
+          const buf = restBufferRef.current;
+          const newBuf = new Int16Array(buf.length + chunk.length);
+          newBuf.set(buf, 0);
+          newBuf.set(chunk, buf.length);
+          restBufferRef.current = newBuf;
+        });
+
+        restFlushTimerRef.current = setTimeout(async () => {
+          await flushRestBuffer();
+          if (restFlushTimerRef.current) {
+            restFlushTimerRef.current = setTimeout(flushRestBuffer, 3000);
+          }
+        }, 3000);
+      }
 
       setIsRecording(true);
       setListeningActive(true);
-      setWsConnected(true);
     } catch (err) {
       console.error("Recording error:", err);
       const message = err instanceof Error ? err.message : String(err);
@@ -495,6 +597,13 @@ export default function SessionScreen() {
   };
 
   const stopRecording = useCallback(async () => {
+    if (restFlushTimerRef.current) {
+      clearTimeout(restFlushTimerRef.current);
+      restFlushTimerRef.current = null;
+    }
+    await flushRestBuffer();
+    restBufferRef.current = new Int16Array(0);
+
     if (streamingCaptureRef.current) {
       streamingCaptureRef.current.stop();
       streamingCaptureRef.current = null;

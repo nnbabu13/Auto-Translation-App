@@ -1,3 +1,12 @@
+export function convertToInt16(float32: Float32Array): Int16Array {
+  const int16 = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32[i]));
+    int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return int16;
+}
+
 export interface AudioStats {
   volumeLevel: number;
   rmsLevel: number;
@@ -24,24 +33,7 @@ export class StreamingCapture {
     wsUrl: string,
     onStats?: (stats: AudioStats) => void,
   ): Promise<void> {
-    this.stop();
-    this.statsCallback = onStats ?? null;
-
-    this.audioContext = new AudioContext({ sampleRate: 16000, latencyHint: "interactive" });
-    if (this.audioContext.state === "suspended") {
-      await this.audioContext.resume();
-    }
-
-    this.source = this.audioContext.createMediaStreamSource(stream);
-
-    this.analyser = this.audioContext.createAnalyser();
-    this.analyser.fftSize = 2048;
-
-    this.scriptProcessor = this.audioContext.createScriptProcessor(4096, 1, 1);
-
-    this.source.connect(this.analyser);
-    this.analyser.connect(this.scriptProcessor);
-    this.scriptProcessor.connect(this.audioContext.destination);
+    this.setupAudio(stream, onStats);
 
     this.ws = new WebSocket(wsUrl);
     this.ws.binaryType = "arraybuffer";
@@ -65,15 +57,10 @@ export class StreamingCapture {
 
     this.isRunning = true;
 
-    this.scriptProcessor.onaudioprocess = (event) => {
+    this.scriptProcessor!.onaudioprocess = (event) => {
       if (!this.isRunning || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
-      const input = event.inputBuffer.getChannelData(0);
-      const int16 = new Int16Array(input.length);
-      for (let i = 0; i < input.length; i++) {
-        const s = Math.max(-1, Math.min(1, input[i]));
-        int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-      }
+      const int16 = convertToInt16(event.inputBuffer.getChannelData(0));
 
       const FRAME_SIZE = 320;
       for (let offset = 0; offset < int16.length; offset += FRAME_SIZE) {
@@ -84,6 +71,43 @@ export class StreamingCapture {
     };
 
     this.startAnalyserLoop();
+  }
+
+  async startRest(
+    stream: MediaStream,
+    onChunk: (pcm16: Int16Array) => void,
+    onStats?: (stats: AudioStats) => void,
+  ): Promise<void> {
+    this.setupAudio(stream, onStats);
+    this.isRunning = true;
+
+    this.scriptProcessor!.onaudioprocess = (event) => {
+      if (!this.isRunning) return;
+      onChunk(convertToInt16(event.inputBuffer.getChannelData(0)));
+    };
+
+    this.startAnalyserLoop();
+  }
+
+  private setupAudio(stream: MediaStream, onStats?: (stats: AudioStats) => void): void {
+    this.stop();
+    this.statsCallback = onStats ?? null;
+
+    this.audioContext = new AudioContext({ sampleRate: 16000, latencyHint: "interactive" });
+    if (this.audioContext.state === "suspended") {
+      this.audioContext.resume().catch(() => {});
+    }
+
+    this.source = this.audioContext.createMediaStreamSource(stream);
+
+    this.analyser = this.audioContext.createAnalyser();
+    this.analyser.fftSize = 2048;
+
+    this.scriptProcessor = this.audioContext.createScriptProcessor(4096, 1, 1);
+
+    this.source.connect(this.analyser);
+    this.analyser.connect(this.scriptProcessor);
+    this.scriptProcessor.connect(this.audioContext.destination);
   }
 
   private startAnalyserLoop(): void {
