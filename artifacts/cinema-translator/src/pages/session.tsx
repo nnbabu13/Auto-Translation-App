@@ -899,10 +899,33 @@ export default function SessionScreen() {
           },
           onVADMisfire: () => {},
           onFrameProcessed: (probability: number, frame: Float32Array) => {
+            let sumSquares = 0;
+            let peak = 0;
+            for (let i = 0; i < frame.length; i++) {
+              const val = frame[i];
+              sumSquares += val * val;
+              peak = Math.max(peak, Math.abs(val));
+            }
+            const rms = Math.sqrt(sumSquares / frame.length);
+
+            const step = Math.max(1, Math.floor(frame.length / 160));
+            const waveform: number[] = [];
+            for (let i = 0; i < frame.length; i += step) {
+              waveform.push((frame[i] + 1) / 2);
+            }
+
             setAudioStats((prev) => ({
               ...prev,
               speechProbability: probability,
               acceptedChunkCount: vadAcceptedCount,
+              rmsLevel: rms,
+              peakLevel: peak,
+              volumeLevel: Math.max(0, Math.min(100, peak * 100)),
+              isClipping: peak >= 0.99,
+              isSilent: rms < 0.005,
+              speechDetected: probability >= 0.3,
+              quality: rms >= 0.03 ? "Excellent" : rms >= 0.01 ? "Good" : "Poor",
+              waveform,
             }));
 
             const density = speechDensityRef.current;
