@@ -1,4 +1,4 @@
-import app from "../api-server-bundle.mjs";
+import { app } from "../api-server-bundle.mjs";
 
 export default function handler(req, res) {
   return app(req, res);
