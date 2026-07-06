@@ -21,9 +21,11 @@
     "openai": "^6.44.0",
     "openid-client": "^6.8.4",
     "pino": "^9.14.0",
-    "pino-http": "^10.5.0"
+    "pino-http": "^10.5.0",
+    "ws": "^8.18.2"
   },
   "devDependencies": {
+    "@types/ws": "^8.18.1",
     "@types/cookie-parser": "^1.4.10",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",

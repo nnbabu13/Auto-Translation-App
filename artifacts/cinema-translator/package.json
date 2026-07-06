@@ -78,7 +78,6 @@
     "zod": "catalog:"
   },
   "dependencies": {
-    "@mintplex-labs/piper-tts-web": "^1.0.4",
-    "@ricky0123/vad-web": "^0.0.30"
+    "@mintplex-labs/piper-tts-web": "^1.0.4"
   }
 }

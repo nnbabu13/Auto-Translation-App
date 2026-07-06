@@ -1,7 +1,6 @@
 
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useRoute, Link } from "wouter";
-import JSZip from "jszip";
 import { useGetSession } from "@workspace/api-client-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -21,55 +20,14 @@ import {
   Zap,
   Users,
 } from "lucide-react";
-import { type AudioStats } from "@/lib/audio/audioProcessor";
 import { QueueManager } from "@/lib/audio/queueManager";
-import { createSileroVad, destroyVad, type MicVAD } from "@/lib/audio/sileroVad";
+import { StreamingCapture, type AudioStats } from "@/lib/audio/streamingCapture";
 import { synthesizeLocal, hasLocalVoice, initPiper, downloadPiperVoice } from "@/lib/audio/piperTts";
 
 type AudioInputDevice = {
   deviceId: string;
   label: string;
 };
-
-type RecordedChunk = {
-  chunkNumber: number;
-  createdAt: number;
-  sessionOffsetMs: number;
-  durationMs: number;
-  rmsLevel: number;
-  peakLevel: number;
-  fileSize: number;
-  speechDetected: boolean;
-  blob: Blob;
-  transcriptionResult: string;
-  translationResult: string;
-};
-
-function padChunkNumber(value: number) {
-  return value.toString().padStart(4, "0");
-}
-
-function formatSessionTime(ms: number) {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const hours = Math.floor(totalSeconds / 3600)
-    .toString()
-    .padStart(2, "0");
-  const minutes = Math.floor((totalSeconds % 3600) / 60)
-    .toString()
-    .padStart(2, "0");
-  const seconds = (totalSeconds % 60).toString().padStart(2, "0");
-  return `${hours}:${minutes}:${seconds}`;
-}
-
-function formatFileSize(bytes: number) {
-  if (bytes < 1024) {
-    return `${bytes} B`;
-  }
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(1)} KB`;
-  }
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-}
 
 function getRmsIndicator(rmsLevel: number) {
   if (rmsLevel < 0.005) {
@@ -85,13 +43,6 @@ function getRmsIndicator(rmsLevel: number) {
     return { color: "#22c55e", label: "Good" };
   }
   return { color: "#3b82f6", label: "Very strong signal" };
-}
-
-function concatFloat32Arrays(a: Float32Array, b: Float32Array): Float32Array {
-  const result = new Float32Array(a.length + b.length);
-  result.set(a, 0);
-  result.set(b, a.length);
-  return result;
 }
 
 export default function SessionScreen() {
@@ -138,14 +89,14 @@ export default function SessionScreen() {
   const [confidence, setConfidence] = useState(0);
   const [currentModel, setCurrentModel] = useState("gpt-4o");
   const [sttModel, setSttModel] = useState("nova-3");
-  const [recordedChunks, setRecordedChunks] = useState<RecordedChunk[]>([]);
   const [diarizationEnabled, setDiarizationEnabled] = useState(false);
   const [currentSpeaker, setCurrentSpeaker] = useState<string | null>(null);
   const [transcriptWithSpeakers, setTranscriptWithSpeakers] = useState<{speaker: string | null; text: string; timestamp: number}[]>([]);
 
-  const [utteranceDurationMs, setUtteranceDurationMs] = useState(0);
-  const [silenceDurationMs, setSilenceDurationMs] = useState(0);
-  const [pendingBufferSizeMs, setPendingBufferSizeMs] = useState(0);
+  const [interimText, setInterimText] = useState("");
+  const [utteranceId, setUtteranceId] = useState<string | null>(null);
+  const [wsConnected, setWsConnected] = useState(false);
+  const [deepgramError, setDeepgramError] = useState<string | null>(null);
 
   const [translationHistory, setTranslationHistory] = useState<Array<{
     original: string;
@@ -164,14 +115,10 @@ export default function SessionScreen() {
     volumeLevel: 0,
     rmsLevel: 0,
     peakLevel: 0,
-    speechProbability: 0,
     isClipping: false,
     isSilent: true,
     quality: "Excellent",
     speechDetected: false,
-    acceptedChunkCount: 0,
-    discardedChunkCount: 0,
-    activeSpeechDurationMs: 0,
     waveform: [],
   });
 
@@ -191,55 +138,19 @@ export default function SessionScreen() {
 
   const streamRef = useRef<MediaStream | null>(null);
   const queueManagerRef = useRef<QueueManager | null>(null);
-  const vadRef = useRef<MicVAD | null>(null);
+  const streamingCaptureRef = useRef<StreamingCapture | null>(null);
   const isRecordingRef = useRef(false);
   const waveformCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const lastRecordedChunkRef = useRef<Blob | null>(null);
-  const playbackAudioRef = useRef<HTMLAudioElement | null>(null);
-  const recordingStartedAtRef = useRef<number | null>(null);
 
   const transcriptRef = useRef<string[]>([]);
   const translationsRef = useRef<string[]>([]);
-  const segmentsRef = useRef<Blob[]>([]);
   const transcriptHistoryRef = useRef<{ text: string; timestamp: number }[]>([]);
-
-  const utteranceBufferRef = useRef<Float32Array>(new Float32Array(0));
-  const utteranceStartTimeRef = useRef<number>(0);
-  const previousUtteranceTailRef = useRef<Float32Array>(new Float32Array(0));
-  const utteranceChunkIndexRef = useRef(0);
-  const lastSpeechEndTimeRef = useRef<number>(Date.now());
-  const lastFlushTimeRef = useRef<number>(Date.now());
-  const lastFlushSpeechStartRef = useRef<number>(0);
-  const speechDensityRef = useRef({ speechFrames: 0, totalFrames: 0 });
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const translationEndRef = useRef<HTMLDivElement>(null);
 
-  const sequenceCounterRef = useRef(0);
-  const nextExpectedSequenceRef = useRef(1);
-  const pendingResultsRef = useRef<Map<number, {
-    sequence: number;
-    originalText: string;
-    translatedText: string;
-    sourceLanguage: string;
-    speaker: string | null;
-    audioBase64: string;
-    latencyMs: number;
-    sttLatencyMs: number;
-    translationLatencyMs: number;
-    ttsLatencyMs: number;
-    confidence: number;
-    chunkNumber: number;
-    chunkRecord: any;
-    speechStartedAt: number;
-    receivedAt: number;
-  }>>(new Map());
-  const activeRequestsRef = useRef(0);
-  const requestQueueRef = useRef<Array<{blob: Blob; chunkNumber: number; stats: AudioStats}>>([]);
-  const playbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const skippedCountRef = useRef(0);
+  const wsRef = useRef<WebSocket | null>(null);
+  const currentUtteranceIdRef = useRef<string | null>(null);
 
-  const [speechDensity, setSpeechDensity] = useState(0);
-  const [skippedChunks, setSkippedChunks] = useState(0);
   const [currentPlaybackRate, setCurrentPlaybackRate] = useState(1.0);
   const [chunkCreationDelay, setChunkCreationDelay] = useState(0);
   const [playbackQueueDelay, setPlaybackQueueDelay] = useState(0);
@@ -258,35 +169,11 @@ export default function SessionScreen() {
     return warnings;
   }, [audioStats.isClipping, audioStats.rmsLevel]);
 
-  const sessionDateStamp = useMemo(() => {
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = `${now.getMonth() + 1}`.padStart(2, "0");
-    const day = `${now.getDate()}`.padStart(2, "0");
-    return `${year}${month}${day}`;
-  }, []);
-
   useEffect(() => {
     isRecordingRef.current = isRecording;
     if (!queueManagerRef.current) {
       queueManagerRef.current = new QueueManager();
     }
-  }, [isRecording]);
-
-  useEffect(() => {
-    if (!isRecording) return;
-    const interval = setInterval(() => {
-      const bufLen = utteranceBufferRef.current.length;
-      const durMs = bufLen > 0 ? (bufLen / 16000) * 1000 : 0;
-      setUtteranceDurationMs(Math.round(durMs));
-      setPendingBufferSizeMs(Math.round(durMs));
-      setSilenceDurationMs(Date.now() - lastSpeechEndTimeRef.current);
-      const density = speechDensityRef.current;
-      setSpeechDensity(
-        density.totalFrames > 0 ? density.speechFrames / density.totalFrames : 0,
-      );
-    }, 200);
-    return () => clearInterval(interval);
   }, [isRecording]);
 
   useEffect(() => {
@@ -382,327 +269,67 @@ export default function SessionScreen() {
     context.stroke();
   }, [audioStats.waveform]);
 
-  const blobToBase64 = (blob: Blob): Promise<string> =>
-    new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        if (typeof reader.result === "string")
-          resolve(reader.result.split(",")[1]);
-        else reject(new Error("Failed to read blob"));
-      };
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
+  const handleFinalResult = useCallback((msg: any) => {
+    if (!session) return;
 
-  const playCapturedChunk = useCallback(async (blob?: Blob | null) => {
-    const chunk = blob ?? lastRecordedChunkRef.current;
-    if (!chunk) {
-      return;
-    }
+    const { text, translatedText, translations, sourceLanguage, speaker, audioBase64, confidence, sequence, translationLatencyMs, ttsLatencyMs, endToEndLatencyMs } = msg;
 
-    const url = URL.createObjectURL(chunk);
-    const audio = playbackAudioRef.current ?? new Audio();
-    playbackAudioRef.current = audio;
-    audio.src = url;
-    await audio.play();
-    audio.onended = () => {
-      URL.revokeObjectURL(url);
-    };
-  }, []);
+    setPreviousOriginalText(text);
+    transcriptRef.current.push(text);
+    translationsRef.current.push(translatedText);
+    transcriptHistoryRef.current.push({ text, timestamp: Date.now() });
 
-  const updateRecordedChunk = useCallback(
-    (chunkNumber: number, patch: Partial<RecordedChunk>) => {
-      setRecordedChunks((current) =>
-        current.map((chunk) =>
-          chunk.chunkNumber === chunkNumber ? { ...chunk, ...patch } : chunk,
-        ),
-      );
-    },
-    [],
-  );
+    setOriginalText(text);
+    setSourceLanguage(sourceLanguage);
+    setConfidence(confidence || 0);
+    setLatency((translationLatencyMs || 0) + (ttsLatencyMs || 0));
 
-  const downloadRecordedChunk = useCallback(
-    (chunk: RecordedChunk) => {
-      const url = URL.createObjectURL(chunk.blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `session_${sessionDateStamp}_chunk_${padChunkNumber(chunk.chunkNumber)}.wav`;
-      anchor.click();
-      URL.revokeObjectURL(url);
-    },
-    [sessionDateStamp],
-  );
-
-  const saveRawWav = useCallback(() => {
-    const latestChunk = recordedChunks[recordedChunks.length - 1];
-    if (!latestChunk) {
-      return;
-    }
-    downloadRecordedChunk(latestChunk);
-  }, [downloadRecordedChunk, recordedChunks]);
-
-  const downloadAllChunksAsZip = useCallback(async () => {
-    if (recordedChunks.length === 0) {
-      return;
-    }
-
-    const zip = new JSZip();
-    const sessionFolder = zip.folder("session");
-    if (!sessionFolder) {
-      return;
-    }
-
-    const sortedChunks = [...recordedChunks].sort((left, right) => left.chunkNumber - right.chunkNumber);
-    for (const chunk of sortedChunks) {
-      sessionFolder.file(`chunk_${padChunkNumber(chunk.chunkNumber)}.wav`, chunk.blob);
-    }
-
-    const metadata = sortedChunks.map((chunk) => ({
-      chunkNumber: chunk.chunkNumber,
-      timestamp: formatSessionTime(chunk.sessionOffsetMs),
-      durationMs: chunk.durationMs,
-      rmsLevel: chunk.rmsLevel,
-      peakLevel: chunk.peakLevel,
-      fileSize: chunk.fileSize,
-      speechDetected: chunk.speechDetected,
-      transcriptionResult: chunk.transcriptionResult,
-      translationResult: chunk.translationResult,
-    }));
-
-    sessionFolder.file("metadata.json", JSON.stringify(metadata, null, 2));
-
-    const zipBlob = await zip.generateAsync({ type: "blob" });
-    const url = URL.createObjectURL(zipBlob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `session_${sessionDateStamp}_chunks.zip`;
-    anchor.click();
-    URL.revokeObjectURL(url);
-  }, [recordedChunks, sessionDateStamp]);
-
-  const processChunk = useCallback(
-    async (blob: Blob, index: number, stats: AudioStats) => {
-      if (!stats.speechDetected || !session) return;
-
-      const chunkNumber = index + 1;
-      const createdAt = Date.now();
-      const sessionOffsetMs = recordingStartedAtRef.current
-        ? createdAt - recordingStartedAtRef.current
-        : 0;
-      const chunkRecord: RecordedChunk = {
-        chunkNumber,
-        createdAt,
-        sessionOffsetMs,
-        durationMs: stats.activeSpeechDurationMs,
-        rmsLevel: stats.rmsLevel,
-        peakLevel: stats.peakLevel,
-        fileSize: blob.size,
-        speechDetected: stats.speechDetected,
-        blob,
-        transcriptionResult: "",
-        translationResult: "",
-      };
-
-      if (activeRequestsRef.current >= 4) {
-        requestQueueRef.current.push({ blob, chunkNumber, stats });
-        return;
-      }
-
-      const sequence = ++sequenceCounterRef.current;
-      activeRequestsRef.current++;
-
-      try {
-        segmentsRef.current.push(blob);
-        lastRecordedChunkRef.current = blob;
-        setRecordedChunks((current) => {
-          const next = [...current, chunkRecord];
-          return next.slice(-100);
-        });
-        if (testMode) {
-          await playCapturedChunk(blob);
-        }
-        const base64Audio = await blobToBase64(blob);
-
-        const nowMs = Date.now();
-        const contextWindowMs = cinemaMode ? 120000 : 60000;
-        const recentTranscripts = transcriptHistoryRef.current
-          .filter((entry) => nowMs - entry.timestamp < contextWindowMs)
-          .map((entry) => entry.text);
-
-        const useCompression = translationHistory.length > 8;
-
-        const response = await fetch("/api/translate/chunk", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            audio: base64Audio,
-            audioExt: "wav",
-            targetLanguage: session.targetLanguage,
-            targetLanguages: session.targetLanguages || [session.targetLanguage],
-            sessionId: session.id,
-            previousText: previousOriginalText,
-            previousTranscripts: recentTranscripts,
-            sourceLanguage: sourceLanguageSetting,
-            model: currentModel,
-            sttModel: sttModel,
-            benchmarkMode,
-            cinemaMode,
-            diarize: diarizationEnabled,
-            compressionMode: useCompression,
-            skipTTS: !ttsEnabled || ttsProvider === "local",
-            sequence,
-          }),
-        });
-
-        if (!response.ok) return;
-        const data = await response.json();
-
-        if (!data.originalText) {
-          setConfidence(0);
-          updateRecordedChunk(chunkNumber, {
-            transcriptionResult: "",
-            translationResult: "",
-          });
-          return;
-        }
-
-        let primaryTranslation = data.translatedText;
-        if (data.translations) {
-          const translations = data.translations as Record<string, string>;
-          primaryTranslation = translations[session.targetLanguage] || data.translatedText;
-        }
-
-        pendingResultsRef.current.set(sequence, {
-          sequence,
-          originalText: data.originalText,
-          translatedText: primaryTranslation,
-          sourceLanguage: data.sourceLanguage,
-          speaker: data.speaker || null,
-          audioBase64: data.audioBase64 || "",
-          latencyMs: data.latencyMs,
-          sttLatencyMs: data.sttLatencyMs || 0,
-          translationLatencyMs: data.translationLatencyMs || 0,
-          ttsLatencyMs: data.ttsLatencyMs || 0,
-          confidence: data.confidence,
-          chunkNumber,
-          chunkRecord,
-          speechStartedAt: lastFlushSpeechStartRef.current,
-          receivedAt: Date.now(),
-        });
-
-        updateRecordedChunk(chunkNumber, {
-          transcriptionResult: data.originalText,
-          translationResult: primaryTranslation,
-        });
-
-        tryPlayNextRef.current();
-      } catch (err) {
-        console.error("Processing error:", err);
-      } finally {
-        activeRequestsRef.current--;
-        processQueuedRequestsRef.current();
-      }
-    },
-    [
-      previousOriginalText,
-      sourceLanguageSetting,
-      session,
-      currentModel,
-      sttModel,
-      benchmarkMode,
-      playCapturedChunk,
-      testMode,
-      updateRecordedChunk,
-      diarizationEnabled,
-      translationHistory.length,
-      ttsEnabled,
-    ]
-  );
-
-  const processChunkRef = useRef(processChunk);
-  processChunkRef.current = processChunk;
-
-  const tryPlayNext = useCallback(() => {
-    const nextSeq = nextExpectedSequenceRef.current;
-    const result = pendingResultsRef.current.get(nextSeq);
-
-    if (playbackTimeoutRef.current) {
-      clearTimeout(playbackTimeoutRef.current);
-      playbackTimeoutRef.current = null;
-    }
-
-    if (!result) {
-      playbackTimeoutRef.current = setTimeout(() => {
-        console.warn(`Skipping sequence ${nextSeq} after 5000ms timeout`);
-        skippedCountRef.current++;
-        setSkippedChunks(skippedCountRef.current);
-        nextExpectedSequenceRef.current++;
-        pendingResultsRef.current.delete(nextSeq);
-        tryPlayNextRef.current();
-      }, 5000);
-      return;
-    }
-
-    pendingResultsRef.current.delete(nextSeq);
-    nextExpectedSequenceRef.current++;
-
-    const now = Date.now();
-    setChunkCreationDelay(result.receivedAt - result.speechStartedAt);
-    setPlaybackQueueDelay(now - result.receivedAt);
-    setEndToEndLatency(now - result.speechStartedAt);
-
-    setPreviousOriginalText(result.originalText);
-    transcriptRef.current.push(result.originalText);
-    translationsRef.current.push(result.translatedText);
-    transcriptHistoryRef.current.push({ text: result.originalText, timestamp: Date.now() });
-
-    setOriginalText(result.originalText);
-    setSourceLanguage(result.sourceLanguage);
-    setLatency(result.latencyMs);
-    setConfidence(result.confidence);
+    setChunkCreationDelay(0);
+    setPlaybackQueueDelay(0);
+    setEndToEndLatency(endToEndLatencyMs || 0);
 
     setTranscriptHistory(prev => [...prev.slice(-19), {
-      text: result.originalText,
-      speaker: result.speaker,
+      text,
+      speaker: speaker || null,
       timestamp: Date.now(),
     }]);
 
-    if (result.speaker) {
-      setCurrentSpeaker(result.speaker);
+    if (speaker) {
+      setCurrentSpeaker(speaker);
       setTranscriptWithSpeakers(prev => [...prev.slice(-30), {
-        speaker: result.speaker,
-        text: result.originalText,
+        speaker,
+        text,
         timestamp: Date.now()
       }]);
     }
 
-    setTranslatedText(result.translatedText);
+    setTranslatedText(translatedText);
     setTranslationHistory(prev => [...prev.slice(-20), {
-      original: result.originalText,
-      translated: result.translatedText,
-      speaker: result.speaker,
+      original: text,
+      translated: translatedText,
+      speaker: speaker || null,
       timestamp: Date.now(),
     }]);
 
     setDebugMetrics((prev) => {
-      const newTotalLatency = prev.totalLatency + result.latencyMs;
+      const newTotalLatency = prev.totalLatency + (translationLatencyMs || 0) + (ttsLatencyMs || 0);
       const newSttRequests = prev.sttRequests + 1;
       return {
         ...prev,
         recordedChunks: prev.recordedChunks + 1,
         sttRequests: newSttRequests,
         translationRequests: prev.translationRequests + 1,
-        ttsRequests: result.audioBase64 ? prev.ttsRequests + 1 : prev.ttsRequests,
+        ttsRequests: audioBase64 ? prev.ttsRequests + 1 : prev.ttsRequests,
         totalLatency: newTotalLatency,
         avgLatency: newTotalLatency / newSttRequests,
-        sttLatency: prev.sttLatency + result.sttLatencyMs,
-        translationLatency: prev.translationLatency + result.translationLatencyMs,
-        ttsLatency: prev.ttsLatency + result.ttsLatencyMs,
+        sttLatency: prev.sttLatency,
+        translationLatency: prev.translationLatency + (translationLatencyMs || 0),
+        ttsLatency: prev.ttsLatency + (ttsLatencyMs || 0),
       };
     });
 
     const shouldUseLocalTTS = ttsEnabled && ttsProvider === "local" && session && hasLocalVoice(session.targetLanguage);
-    const audioForPlayback = result.audioBase64 || "";
+    const audioForPlayback = audioBase64 || "";
 
     if ((audioForPlayback || shouldUseLocalTTS) && queueManagerRef.current) {
       const qLen = queueManagerRef.current.getPlaybackQueueLength();
@@ -717,20 +344,20 @@ export default function SessionScreen() {
       }
       setCurrentPlaybackRate(queueManagerRef.current.getPlaybackRate());
 
-      if (shouldUseLocalTTS && !result.audioBase64 && result.translatedText && session) {
+      if (shouldUseLocalTTS && !audioBase64 && translatedText && session) {
         setSpeakingActive(true);
-        synthesizeLocal(result.translatedText, session.targetLanguage).then((wavBlob) => {
+        synthesizeLocal(translatedText, session.targetLanguage).then((wavBlob) => {
           if (wavBlob && queueManagerRef.current) {
             const reader = new FileReader();
             reader.onloadend = () => {
               const base64 = (reader.result as string).split(",")[1];
               queueManagerRef.current!.addToPlaybackQueue({
                 chunkId: Date.now(),
-                originalText: result.originalText,
-                translatedText: result.translatedText,
-                sourceLanguage: result.sourceLanguage,
+                originalText: text,
+                translatedText,
+                sourceLanguage,
                 audioBase64: base64,
-                latencyMs: result.latencyMs,
+                latencyMs: (translationLatencyMs || 0) + (ttsLatencyMs || 0),
               });
               setAudioQueueLength(queueManagerRef.current!.getPlaybackQueueLength());
               setEstimatedWaitMs(queueManagerRef.current!.getEstimatedWaitMs());
@@ -744,118 +371,29 @@ export default function SessionScreen() {
       } else if (audioForPlayback) {
         queueManagerRef.current.addToPlaybackQueue({
           chunkId: Date.now(),
-          originalText: result.originalText,
-          translatedText: result.translatedText,
-          sourceLanguage: result.sourceLanguage,
+          originalText: text,
+          translatedText,
+          sourceLanguage,
           audioBase64: audioForPlayback,
-          latencyMs: result.latencyMs,
+          latencyMs: (translationLatencyMs || 0) + (ttsLatencyMs || 0),
         });
         setAudioQueueLength(queueManagerRef.current.getPlaybackQueueLength());
         setEstimatedWaitMs(queueManagerRef.current.getEstimatedWaitMs());
       }
     }
 
-    setProcessingCount(activeRequestsRef.current + requestQueueRef.current.length);
-
-    if (pendingResultsRef.current.has(nextExpectedSequenceRef.current)) {
-      tryPlayNextRef.current();
-    }
-  }, [ttsProvider, ttsEnabled, session?.targetLanguage]);
-
-  const tryPlayNextRef = useRef(tryPlayNext);
-  tryPlayNextRef.current = tryPlayNext;
-
-  const processQueuedRequests = useCallback(() => {
-    while (
-      requestQueueRef.current.length > 0 &&
-      activeRequestsRef.current < 4
-    ) {
-      const next = requestQueueRef.current.shift()!;
-      processChunkRef.current(next.blob, next.chunkNumber, next.stats);
-    }
-  }, []);
-
-  const processQueuedRequestsRef = useRef(processQueuedRequests);
-  processQueuedRequestsRef.current = processQueuedRequests;
-
-  const flushUtterance = useCallback(async () => {
-    const buffer = utteranceBufferRef.current;
-    if (buffer.length === 0) return;
-
-    const SAMPLE_RATE = 16000;
-    let audioToSend = buffer;
-    if (previousUtteranceTailRef.current.length > 0) {
-      audioToSend = concatFloat32Arrays(previousUtteranceTailRef.current, buffer);
-    }
-
-    const tailSamples = SAMPLE_RATE * 2;
-    if (buffer.length > tailSamples) {
-      previousUtteranceTailRef.current = buffer.slice(-tailSamples);
-    } else {
-      previousUtteranceTailRef.current = new Float32Array(buffer);
-    }
-
-    utteranceBufferRef.current = new Float32Array(0);
-    utteranceStartTimeRef.current = 0;
-    lastFlushTimeRef.current = Date.now();
-    speechDensityRef.current = { speechFrames: 0, totalFrames: 0 };
-    setUtteranceDurationMs(0);
-    setPendingBufferSizeMs(0);
-    setSilenceDurationMs(0);
-
-    const durationMs = (audioToSend.length / SAMPLE_RATE) * 1000;
-    let sumSquares = 0;
-    let peak = 0;
-    for (let i = 0; i < audioToSend.length; i++) {
-      const val = audioToSend[i];
-      sumSquares += val * val;
-      peak = Math.max(peak, Math.abs(val));
-    }
-    const rmsLevel = Math.sqrt(sumSquares / audioToSend.length);
-
-    const { encodeWavPCM16 } = await import("@/lib/audio/wavEncoder");
-    const wavBlob = encodeWavPCM16(audioToSend, SAMPLE_RATE);
-
-    const stats: AudioStats = {
-      volumeLevel: Math.max(0, Math.min(100, peak * 100)),
-      rmsLevel,
-      peakLevel: peak,
-      speechProbability: 0.9,
-      isClipping: peak >= 0.99,
-      isSilent: false,
-      quality: rmsLevel >= 0.03 ? "Excellent" : rmsLevel >= 0.01 ? "Good" : "Poor",
-      speechDetected: true,
-      acceptedChunkCount: utteranceChunkIndexRef.current + 1,
-      discardedChunkCount: 0,
-      activeSpeechDurationMs: durationMs,
-      waveform: [],
-    };
-
-    utteranceChunkIndexRef.current++;
-    lastFlushSpeechStartRef.current = utteranceStartTimeRef.current || Date.now();
-    setAudioStats(stats);
-    processChunkRef.current(wavBlob, utteranceChunkIndexRef.current, stats);
-  }, []);
-
-  const flushUtteranceRef = useRef<() => Promise<void>>(async () => {});
-  flushUtteranceRef.current = flushUtterance;
-
+    setProcessingCount(0);
+  }, [ttsProvider, ttsEnabled, session?.targetLanguage, session]);
 
   const startRecording = async () => {
     if (!session || isRecording) return;
     try {
-      if (vadRef.current) {
-        vadRef.current.destroy();
-        vadRef.current = null;
-      }
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
       }
 
-      let stream: MediaStream;
-
-      stream = await navigator.mediaDevices.getUserMedia({
+      const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           deviceId: selectedDeviceId ? { exact: selectedDeviceId } : undefined,
           channelCount: 1,
@@ -875,94 +413,66 @@ export default function SessionScreen() {
       );
 
       streamRef.current = stream;
-      recordingStartedAtRef.current = Date.now();
-      setRecordedChunks([]);
-      lastRecordedChunkRef.current = null;
       await loadAudioDevices();
 
-      let vadAcceptedCount = 0;
+      const wsUrlOverride = import.meta.env.VITE_WS_URL;
+      const protocol = location.protocol === "https:" ? "wss" : "ws";
+      const wsHost = import.meta.env.DEV ? "localhost:3000" : location.host;
+      const wsPath = `/api/stream?sessionId=${session.id}&targetLanguage=${session.targetLanguage}&sourceLanguage=${sourceLanguageSetting}&model=${currentModel}&sttModel=${sttModel}&cinemaMode=${cinemaMode}&diarize=${diarizationEnabled}&compressionMode=${translationHistory.length > 8}&skipTTS=${!ttsEnabled || ttsProvider === "local"}`;
 
-      const vad = await createSileroVad(
-        {
-          onSpeechStart: () => {
-            setListeningActive(true);
-          },
-          onSpeechEnd: async (_audio: Float32Array) => {
-            const SAMPLE_RATE = 16000;
-            lastSpeechEndTimeRef.current = Date.now();
-            lastFlushTimeRef.current = Date.now();
+      const wsUrl = wsUrlOverride || `${protocol}://${wsHost}${wsPath}`;
 
-            const remainingMs = (utteranceBufferRef.current.length / SAMPLE_RATE) * 1000;
-            if (remainingMs >= 1500) {
-              await flushUtteranceRef.current();
-            }
-          },
-          onVADMisfire: () => {},
-          onFrameProcessed: (probability: number, frame: Float32Array) => {
-            let sumSquares = 0;
-            let peak = 0;
-            for (let i = 0; i < frame.length; i++) {
-              const val = frame[i];
-              sumSquares += val * val;
-              peak = Math.max(peak, Math.abs(val));
-            }
-            const rms = Math.sqrt(sumSquares / frame.length);
+      const capture = new StreamingCapture();
+      streamingCaptureRef.current = capture;
 
-            const step = Math.max(1, Math.floor(frame.length / 160));
-            const waveform: number[] = [];
-            for (let i = 0; i < frame.length; i += step) {
-              waveform.push((frame[i] + 1) / 2);
-            }
+      capture.setStatsCallback((stats) => setAudioStats(stats));
+      await capture.start(stream, wsUrl);
 
-            setAudioStats((prev) => ({
-              ...prev,
-              speechProbability: probability,
-              acceptedChunkCount: vadAcceptedCount,
-              rmsLevel: rms,
-              peakLevel: peak,
-              volumeLevel: Math.max(0, Math.min(100, peak * 100)),
-              isClipping: peak >= 0.99,
-              isSilent: rms < 0.005,
-              speechDetected: probability >= 0.3,
-              quality: rms >= 0.03 ? "Excellent" : rms >= 0.01 ? "Good" : "Poor",
-              waveform,
-            }));
+      const ws = capture.getWs();
+      wsRef.current = ws;
 
-            const density = speechDensityRef.current;
-            density.totalFrames++;
-            if (probability >= 0.10) {
-              density.speechFrames++;
-            }
+      if (!ws) {
+        throw new Error("WebSocket not available after start");
+      }
 
-            if (probability >= 0.10) {
-              utteranceBufferRef.current = concatFloat32Arrays(utteranceBufferRef.current, frame);
-              if (utteranceStartTimeRef.current === 0) {
-                utteranceStartTimeRef.current = Date.now();
-              }
-            }
+      ws.addEventListener("message", (event) => {
+        const msg = JSON.parse(event.data as string);
+        switch (msg.type) {
+          case "interim":
+            currentUtteranceIdRef.current = msg.utteranceId;
+            setInterimText(msg.text);
+            setUtteranceId(msg.utteranceId);
+            break;
 
-            if (utteranceBufferRef.current.length > 0 && Date.now() - lastFlushTimeRef.current > 6000) {
-              flushUtteranceRef.current();
-            }
-          },
-        },
-        {
-          positiveSpeechThreshold: 0.3,
-          negativeSpeechThreshold: 0.25,
-          redemptionMs: 1500,
-          minSpeechMs: 0,
-          preSpeechPadMs: 400,
-          model: "v5",
-          stream: streamRef.current,
-          submitUserSpeechOnPause: true,
-        },
-      );
+          case "final":
+            setInterimText("");
+            currentUtteranceIdRef.current = null;
+            setUtteranceId(null);
+            handleFinalResult(msg);
+            break;
 
-      vadRef.current = vad;
-      vad.start();
+          case "utteranceEnd":
+            currentUtteranceIdRef.current = null;
+            setUtteranceId(null);
+            break;
+
+          case "error":
+            setDeepgramError(msg.message);
+            break;
+        }
+      });
+
+      ws.addEventListener("open", () => {
+        setWsConnected(true);
+      });
+
+      ws.addEventListener("close", () => {
+        setWsConnected(false);
+      });
 
       setIsRecording(true);
       setListeningActive(true);
+      setWsConnected(true);
     } catch (err) {
       console.error("Recording error:", err);
       const message = err instanceof Error ? err.message : String(err);
@@ -973,8 +483,6 @@ export default function SessionScreen() {
         description = "No audio input device found. Please connect a microphone or select a different device.";
       } else if (message.includes("NotReadableError") || message.includes("OverconstrainedError")) {
         description = `Audio device error: ${message}`;
-      } else if (message.includes("fetch") || message.includes("network") || message.includes("WASM")) {
-        description = `Failed to load VAD model files. Check your network connection.`;
       } else {
         description = `Recording setup failed: ${message}`;
       }
@@ -987,19 +495,21 @@ export default function SessionScreen() {
   };
 
   const stopRecording = useCallback(async () => {
-    if (utteranceBufferRef.current.length > 0) {
-      await flushUtteranceRef.current();
+    if (streamingCaptureRef.current) {
+      streamingCaptureRef.current.stop();
+      streamingCaptureRef.current = null;
     }
-    if (vadRef.current) {
-      await vadRef.current.destroy();
-      vadRef.current = null;
-    }
+    wsRef.current = null;
+    currentUtteranceIdRef.current = null;
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
     }
     setIsRecording(false);
     setListeningActive(false);
+    setWsConnected(false);
+    setInterimText("");
+    setUtteranceId(null);
   }, []);
 
   const downloadSessionLogs = useCallback(async () => {
@@ -1068,22 +578,6 @@ export default function SessionScreen() {
           <Button
             variant="outline"
             className="border-border text-foreground hover:bg-muted"
-            onClick={saveRawWav}
-            disabled={!lastRecordedChunkRef.current}
-          >
-            Save Raw WAV
-          </Button>
-          <Button
-            variant="outline"
-            className="border-border text-foreground hover:bg-muted"
-            onClick={() => playCapturedChunk()}
-            disabled={!lastRecordedChunkRef.current}
-          >
-            Play Last Chunk
-          </Button>
-          <Button
-            variant="outline"
-            className="border-border text-foreground hover:bg-muted"
             onClick={() => setCinemaMode(!cinemaMode)}
           >
             <MonitorPlay className="w-4 h-4 mr-2" />
@@ -1112,14 +606,6 @@ export default function SessionScreen() {
           >
             <Download className="w-4 h-4 mr-2" />
             Download Logs
-          </Button>
-          <Button
-            variant="outline"
-            className="border-border text-foreground hover:bg-muted"
-            onClick={downloadAllChunksAsZip}
-            disabled={recordedChunks.length === 0}
-          >
-            Download All Chunks ZIP
           </Button>
           <Button
             variant="outline"
@@ -1411,40 +897,34 @@ export default function SessionScreen() {
                 </div>
               </div>
               <div className="flex justify-between text-sm">
-                <span className="text-muted-foreground">Speech Probability</span>
-                <span className="text-white font-mono">
-                  {(audioStats.speechProbability * 100).toFixed(0)}%
+                <span className="text-muted-foreground">WebSocket</span>
+                <span className={wsConnected ? "text-green-500" : "text-red-500"}>
+                  {wsConnected ? "Connected" : "Disconnected"}
                 </span>
               </div>
               <div className="border-t border-border pt-3 mt-3">
                 <p className="text-xs font-medium text-primary uppercase tracking-wider mb-2">
-                  Movie Mode
+                  Deepgram Stream
                 </p>
                 <div className="space-y-1">
                   <div className="flex justify-between text-sm">
-                    <span className="text-muted-foreground">Chunk</span>
+                    <span className="text-muted-foreground">Utterance ID</span>
                     <span className="text-white font-mono">
-                      {(utteranceDurationMs / 1000).toFixed(1)}s
+                      {utteranceId || "---"}
                     </span>
                   </div>
                   <div className="flex justify-between text-sm">
-                    <span className="text-muted-foreground">Density</span>
-                    <span className="text-white font-mono">
-                      {(speechDensity * 100).toFixed(0)}%
+                    <span className="text-muted-foreground">Interim</span>
+                    <span className="text-white font-mono truncate max-w-[120px]">
+                      {interimText || "---"}
                     </span>
                   </div>
-                  <div className="flex justify-between text-sm">
-                    <span className="text-muted-foreground">Silence</span>
-                    <span className="text-white font-mono">
-                      {(silenceDurationMs / 1000).toFixed(1)}s
-                    </span>
-                  </div>
-                  <div className="flex justify-between text-sm">
-                    <span className="text-muted-foreground">Buffer</span>
-                    <span className="text-white font-mono">
-                      {(pendingBufferSizeMs / 1000).toFixed(1)}s
-                    </span>
-                  </div>
+                  {deepgramError && (
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Error</span>
+                      <span className="text-red-500 font-mono text-xs">{deepgramError}</span>
+                    </div>
+                  )}
                 </div>
               </div>
               <div className="flex justify-between text-sm">
@@ -1537,15 +1017,9 @@ export default function SessionScreen() {
                 )}
               </div>
               <div>
-                <p className="text-sm text-muted-foreground mb-1">Accepted Chunks</p>
+                <p className="text-sm text-muted-foreground mb-1">Sequences</p>
                 <p className="text-2xl font-bold text-white font-mono">
-                  {audioStats.acceptedChunkCount}
-                </p>
-              </div>
-              <div>
-                <p className="text-sm text-muted-foreground mb-1">Discarded Chunks</p>
-                <p className="text-2xl font-bold text-white font-mono">
-                  {audioStats.discardedChunkCount}
+                  {debugMetrics.sttRequests}
                 </p>
               </div>
             </CardContent>
@@ -1584,11 +1058,18 @@ export default function SessionScreen() {
                       </p>
                     </div>
                   ))}
+                  {interimText && (
+                    <div className="opacity-40">
+                      <p className="text-2xl lg:text-3xl font-medium leading-relaxed text-muted-foreground italic">
+                        {interimText}
+                      </p>
+                    </div>
+                  )}
                   <div ref={transcriptEndRef} />
                 </div>
               ) : (
                 <p className="text-3xl lg:text-4xl font-medium leading-relaxed text-muted-foreground">
-                  {"Waiting for audio input..."}
+                  {interimText || "Waiting for audio input..."}
                 </p>
               )}
             </CardContent>
@@ -1639,13 +1120,6 @@ export default function SessionScreen() {
           <div className="flex justify-between items-center mb-4">
             <h2 className="text-xl font-bold text-white">Debug Panel</h2>
             <div className="flex items-center gap-3">
-              <Button
-                variant="outline"
-                onClick={downloadAllChunksAsZip}
-                disabled={recordedChunks.length === 0}
-              >
-                Download All Chunks as ZIP
-              </Button>
               <Button variant="outline" onClick={() => setShowDebugPanel(false)}>
                 Close
               </Button>
@@ -1653,8 +1127,8 @@ export default function SessionScreen() {
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div>
-              <p className="text-sm text-muted-foreground">Recorded Chunks</p>
-              <p className="text-2xl font-bold">{audioStats.acceptedChunkCount}</p>
+              <p className="text-sm text-muted-foreground">Sequences</p>
+              <p className="text-2xl font-bold">{debugMetrics.sttRequests}</p>
             </div>
             <div>
               <p className="text-sm text-muted-foreground">STT Requests</p>
@@ -1675,24 +1149,8 @@ export default function SessionScreen() {
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
             <div>
-              <p className="text-sm text-muted-foreground">Active Requests</p>
-              <p className="text-2xl font-bold text-cyan-500">{activeRequestsRef.current}/4</p>
-            </div>
-            <div>
-              <p className="text-sm text-muted-foreground">Queued Requests</p>
-              <p className="text-2xl font-bold text-yellow-500">{requestQueueRef.current.length}</p>
-            </div>
-            <div>
-              <p className="text-sm text-muted-foreground">Pending Results</p>
-              <p className="text-2xl font-bold text-orange-500">{pendingResultsRef.current.size}</p>
-            </div>
-            <div>
-              <p className="text-sm text-muted-foreground">Skipped Chunks</p>
-              <p className="text-2xl font-bold text-red-500">{skippedChunks}</p>
-            </div>
-            <div>
-              <p className="text-sm text-muted-foreground">Next Expected Seq</p>
-              <p className="text-2xl font-bold text-green-500">{nextExpectedSequenceRef.current}</p>
+              <p className="text-sm text-muted-foreground">WebSocket</p>
+              <p className="text-2xl font-bold" style={{ color: wsConnected ? "#22c55e" : "#ef4444" }}>{wsConnected ? "Connected" : "Disconnected"}</p>
             </div>
             <div>
               <p className="text-sm text-muted-foreground">Playback Rate</p>
@@ -1703,91 +1161,26 @@ export default function SessionScreen() {
               <p className="text-2xl font-bold text-emerald-500">{translationHistory.length > 8 ? "ON" : "OFF"}</p>
             </div>
             <div>
-              <p className="text-sm text-muted-foreground">Total Sequences</p>
-              <p className="text-2xl font-bold text-blue-500">{sequenceCounterRef.current}</p>
+              <p className="text-sm text-muted-foreground">Utterance ID</p>
+              <p className="text-2xl font-bold text-blue-500">{utteranceId || "---"}</p>
             </div>
           </div>
           <div className="grid grid-cols-3 gap-4 mt-4">
             <div className="rounded border border-border bg-sidebar/40 p-3">
-              <p className="text-xs text-muted-foreground uppercase">Chunk Creation Delay</p>
-              <p className="text-2xl font-bold text-yellow-500">{(chunkCreationDelay / 1000).toFixed(1)}s</p>
-              <p className="text-xs text-muted-foreground">Speech start → chunk ready</p>
+              <p className="text-xs text-muted-foreground uppercase">Translation Latency</p>
+              <p className="text-2xl font-bold text-yellow-500">{(debugMetrics.sttRequests > 0 ? (debugMetrics.translationLatency / debugMetrics.sttRequests) : 0).toFixed(0)}ms</p>
+              <p className="text-xs text-muted-foreground">Avg translation time</p>
             </div>
             <div className="rounded border border-border bg-sidebar/40 p-3">
-              <p className="text-xs text-muted-foreground uppercase">Playback Queue Delay</p>
-              <p className="text-2xl font-bold text-orange-500">{(playbackQueueDelay / 1000).toFixed(1)}s</p>
-              <p className="text-xs text-muted-foreground">API done → display</p>
+              <p className="text-xs text-muted-foreground uppercase">TTS Latency</p>
+              <p className="text-2xl font-bold text-orange-500">{(debugMetrics.ttsRequests > 0 ? (debugMetrics.ttsLatency / debugMetrics.ttsRequests) : 0).toFixed(0)}ms</p>
+              <p className="text-xs text-muted-foreground">Avg TTS generation</p>
             </div>
             <div className="rounded border border-border bg-sidebar/40 p-3">
               <p className="text-xs text-muted-foreground uppercase">End-to-End Latency</p>
               <p className="text-2xl font-bold text-red-500">{(endToEndLatency / 1000).toFixed(1)}s</p>
-              <p className="text-xs text-muted-foreground">Speech start → displayed</p>
+              <p className="text-xs text-muted-foreground">Final → displayed</p>
             </div>
-          </div>
-          <div className="mt-6 space-y-3">
-            {recordedChunks.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
-                No recorded chunks yet. Start capture to inspect WAV input.
-              </p>
-            ) : (
-              [...recordedChunks]
-                .sort((left, right) => right.chunkNumber - left.chunkNumber)
-                .map((chunk) => {
-                  const indicator = getRmsIndicator(chunk.rmsLevel);
-                  return (
-                    <div
-                      key={chunk.chunkNumber}
-                      className="rounded border border-border bg-sidebar/40 p-4"
-                    >
-                      <div className="flex flex-wrap items-start justify-between gap-4">
-                        <div className="space-y-1">
-                          <p className="text-lg font-semibold text-white">
-                            Chunk {chunk.chunkNumber}
-                          </p>
-                          <p className="text-sm text-muted-foreground">
-                            Time: {formatSessionTime(chunk.sessionOffsetMs)}
-                          </p>
-                          <p className="text-sm text-muted-foreground">
-                            Duration: {(chunk.durationMs / 1000).toFixed(1)}s
-                          </p>
-                          <p className="text-sm text-muted-foreground">
-                            RMS: {chunk.rmsLevel.toFixed(3)}
-                          </p>
-                          <p className="text-sm text-muted-foreground">
-                            Peak: {chunk.peakLevel.toFixed(3)}
-                          </p>
-                          <p className="text-sm text-muted-foreground">
-                            File Size: {formatFileSize(chunk.fileSize)}
-                          </p>
-                          <p className="text-sm text-muted-foreground">
-                            Speech: {chunk.speechDetected ? "YES" : "NO"}
-                          </p>
-                          <p
-                            className="text-sm font-medium"
-                            style={{ color: indicator.color }}
-                          >
-                            {indicator.label}
-                          </p>
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          <Button
-                            variant="outline"
-                            onClick={() => playCapturedChunk(chunk.blob)}
-                          >
-                            Play
-                          </Button>
-                          <Button
-                            variant="outline"
-                            onClick={() => downloadRecordedChunk(chunk)}
-                          >
-                            Download
-                          </Button>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })
-            )}
           </div>
         </div>
       )}
@@ -1811,24 +1204,24 @@ export default function SessionScreen() {
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-lg text-white">
-                      Audio Quality Score
+                      WebSocket Status
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <p className="text-3xl font-bold text-green-500">
-                      {debugMetrics.audioQualityScore}%
+                    <p className={`text-3xl font-bold ${wsConnected ? "text-green-500" : "text-red-500"}`}>
+                      {wsConnected ? "Connected" : "Disconnected"}
                     </p>
                   </CardContent>
                 </Card>
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-lg text-white">
-                      VAD Discard Rate
+                      Deepgram Model
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
                     <p className="text-3xl font-bold text-blue-500">
-                      {debugMetrics.vadDiscardPercent}%
+                      {sttModel}
                     </p>
                   </CardContent>
                 </Card>

@@ -1,7 +1,5 @@
 import { Router, type IRouter } from "express";
-import { db, translationLogsTable, translationSessionsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
-import { synthesizeSpeech, hasPiperVoice } from "../lib/piperTts";
+import { translateAndGenerateTts, type TranslationInput } from "../lib/translationService";
 
 const router: IRouter = Router();
 const MIN_CONFIDENCE = 0.3;
@@ -34,40 +32,6 @@ function isDeepgramModel(model: string): model is DeepgramModel {
 function isOpenAIModel(model: string): model is OpenAIModel {
   return (OPENAI_MODELS as readonly string[]).includes(model);
 }
-
-const LANGUAGE_NAMES: Record<string, string> = {
-  Greek: "Greek",
-  English: "English",
-  Hindi: "Hindi",
-  Telugu: "Telugu",
-  Russian: "Russian",
-  German: "German",
-  French: "French",
-  Arabic: "Arabic",
-  Spanish: "Spanish",
-  Italian: "Italian",
-  Portuguese: "Portuguese",
-  Japanese: "Japanese",
-  Korean: "Korean",
-  Chinese: "Chinese",
-};
-
-const TTS_VOICE_MAP: Record<string, "alloy" | "echo" | "fable" | "onyx" | "nova" | "shimmer" | "ash" | "ballad" | "coral" | "sage" | "verse"> = {
-  Greek: "nova",
-  English: "alloy",
-  Hindi: "shimmer",
-  Telugu: "shimmer",
-  Russian: "echo",
-  German: "onyx",
-  French: "fable",
-  Arabic: "nova",
-  Spanish: "coral",
-  Italian: "sage",
-  Portuguese: "ballad",
-  Japanese: "ash",
-  Korean: "verse",
-  Chinese: "nova",
-};
 
 function containsHallucinationPhrase(text: string): boolean {
   const normalized = text.trim().toLowerCase();
@@ -258,168 +222,40 @@ router.post("/translate/chunk", async (req, res): Promise<void> => {
   }
 
   sttLatencyMs = Date.now() - sttStartTime;
-  const translationStartTime = Date.now();
 
   const OpenAI = (await import("openai")).default;
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const openaiForTts = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-  const languagesToTranslate = Array.isArray(targetLanguages) && targetLanguages.length > 0
-    ? targetLanguages
-    : [targetLanguage];
+  const useCompression = compressionMode || (Array.isArray(previousTranscripts) && previousTranscripts.length > 8);
 
-  const primaryLang = targetLanguage;
-  
-  // Get active listeners early to know all languages needed
-  const activeListeners = await db
-    .select()
-    .from((await import("@workspace/db")).sessionListenersTable)
-    .where(eq((await import("@workspace/db")).sessionListenersTable.sessionId, sessionId));
+  const translationInput: TranslationInput = {
+    originalText,
+    sourceLanguage: detectedLanguage,
+    targetLanguage,
+    targetLanguages,
+    sessionId,
+    previousTranscripts,
+    speaker,
+    primaryLang: targetLanguage,
+    cinemaMode,
+    compressionMode: useCompression,
+    skipTTS,
+    translationModel,
+  };
 
-  const allLanguages = new Set<string>([primaryLang, ...languagesToTranslate]);
-  activeListeners.forEach(listener => allLanguages.add(listener.targetLanguage));
+  const translationResult = await translateAndGenerateTts(translationInput, openaiForTts);
 
-  const translations: Record<string, string> = {};
-
-  // Execute all translations in parallel
-  await Promise.all(
-    Array.from(allLanguages).map(async (lang) => {
-      const langName = LANGUAGE_NAMES[lang] ?? lang;
-      const isPrimary = lang === primaryLang;
-      
-      const messages: any[] = [
-        {
-          role: "system",
-          content: [
-            `You are a professional translator. Translate the given text into ${langName}.`,
-            `Output ONLY the translated text, no explanations, no notes, no quotes.`,
-            `Preserve names, places, emotional tone, and movie terminology.`,
-            isPrimary ? `Use the context from previous translations to maintain consistency.` : "",
-            isPrimary && cinemaMode ? `Prioritize accuracy over speed. Use formal register when appropriate.` : "",
-            isPrimary && compressionMode ? `Translate concisely. Remove filler words (um, uh, well, like, you know, I mean). Keep essential meaning only. Shorter is better.` : "",
-          ].filter(Boolean).join(" "),
-        },
-      ];
-
-      if (isPrimary) {
-        if (Array.isArray(previousTranscripts) && previousTranscripts.length > 0) {
-          const contextLimit = cinemaMode ? 20 : 10;
-          const contextWindow = previousTranscripts.slice(-contextLimit).join(" ");
-          messages.push({
-            role: "system",
-            content: `Previous dialogue context (for consistency): ${contextWindow}`,
-          });
-        } else if (previousText) {
-          messages.push({
-            role: "system",
-            content: `Previous text: ${previousText}`,
-          });
-        }
-
-        if (speaker) {
-          messages.push({
-            role: "system",
-            content: `Note: This dialogue is spoken by ${speaker}.`,
-          });
-        }
-      }
-
-      messages.push({
-        role: "user",
-        content: originalText,
-      });
-
-      try {
-        const response = await openai.chat.completions.create({
-          model: translationModel,
-          max_tokens: 1000,
-          messages,
-        });
-        translations[lang] = response.choices[0]?.message?.content?.trim() ?? "";
-      } catch (err) {
-        console.error(`Translation error for ${lang}:`, err);
-        translations[lang] = "";
-      }
-    })
-  );
-
-  const translatedText = translations[primaryLang] ?? "";
-  translationLatencyMs = Date.now() - translationStartTime;
-  const ttsStartTime = Date.now();
-
-  let audioBase64 = "";
-
-  if (!skipTTS) {
-    // Run TTS and DB insertion in parallel
-    await Promise.all([
-      (async () => {
-        try {
-          if (hasPiperVoice(primaryLang)) {
-            const wavBuffer = await synthesizeSpeech(translatedText || " ", primaryLang);
-            if (wavBuffer) {
-              audioBase64 = wavBuffer.toString("base64");
-            }
-          } else {
-            // Fallback to OpenAI TTS
-            const voice = TTS_VOICE_MAP[primaryLang] ?? "alloy";
-            const ttsResponse = await openai.audio.speech.create({
-              model: "tts-1",
-              voice,
-              input: translatedText || " ",
-              response_format: "pcm",
-            });
-            audioBase64 = Buffer.from(await ttsResponse.arrayBuffer()).toString("base64");
-          }
-        } catch (err) {
-          console.error("TTS error:", err);
-        }
-      })(),
-      (async () => {
-        try {
-          await db.insert(translationLogsTable).values({
-            sessionId,
-            originalText,
-            translatedText,
-            sourceLanguage,
-            targetLanguage: primaryLang,
-            speaker,
-          });
-        } catch (err) {
-          console.error("DB insert error:", err);
-        }
-      })()
-    ]);
-  } else {
-    try {
-      await db.insert(translationLogsTable).values({
-        sessionId,
-        originalText,
-        translatedText,
-        sourceLanguage,
-        targetLanguage: primaryLang,
-        speaker,
-      });
-    } catch (err) {
-      console.error("DB insert error:", err);
-    }
-  }
-
-  ttsLatencyMs = Date.now() - ttsStartTime;
+  translationLatencyMs = translationResult.translationLatencyMs;
+  ttsLatencyMs = translationResult.ttsLatencyMs;
   const latencyMs = Date.now() - startTime;
 
-  const listenerTranslations: Record<string, string> = {};
-  for (const listener of activeListeners) {
-    if (listener.targetLanguage !== primaryLang && translations[listener.targetLanguage]) {
-      listenerTranslations[listener.targetLanguage] = translations[listener.targetLanguage];
-    }
-  }
-
   res.json({
-    originalText,
-    translatedText,
-    translations: { ...translations, ...listenerTranslations },
+    originalText: translationResult.originalText,
+    translatedText: translationResult.translatedText,
+    translations: translationResult.translations,
     sourceLanguage: detectedLanguage,
-    speaker,
-    audioBase64,
+    speaker: translationResult.speaker,
+    audioBase64: translationResult.audioBase64,
     latencyMs,
     sttLatencyMs,
     translationLatencyMs,
