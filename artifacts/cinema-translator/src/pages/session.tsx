@@ -390,7 +390,10 @@ export default function SessionScreen() {
 
   const flushRestBuffer = useCallback(async () => {
     const buf = restBufferRef.current;
-    if (buf.length === 0) return;
+    if (buf.length === 0) {
+      restFlushTimerRef.current = setTimeout(flushRestBuffer, 3000);
+      return;
+    }
 
     restBufferRef.current = new Int16Array(0);
 
@@ -409,7 +412,10 @@ export default function SessionScreen() {
       reader.readAsDataURL(wavBlob);
     });
 
-    if (!session) return;
+    if (!session) {
+      restFlushTimerRef.current = setTimeout(flushRestBuffer, 3000);
+      return;
+    }
 
     const nowMs = Date.now();
     const contextWindowMs = cinemaMode ? 120000 : 60000;
@@ -440,10 +446,16 @@ export default function SessionScreen() {
         }),
       });
 
-      if (!response.ok) return;
+      if (!response.ok) {
+        restFlushTimerRef.current = setTimeout(flushRestBuffer, 3000);
+        return;
+      }
       const data = await response.json();
 
-      if (!data.originalText) return;
+      if (!data.originalText) {
+        restFlushTimerRef.current = setTimeout(flushRestBuffer, 3000);
+        return;
+      }
 
       handleFinalResult({
         text: data.originalText,
@@ -461,6 +473,7 @@ export default function SessionScreen() {
     } catch (err) {
       console.error("REST flush error:", err);
     }
+    restFlushTimerRef.current = setTimeout(flushRestBuffer, 3000);
   }, [session, sourceLanguageSetting, currentModel, sttModel, cinemaMode, diarizationEnabled, translationHistory.length, ttsEnabled, ttsProvider]);
 
   const startRecording = async () => {
@@ -565,12 +578,7 @@ export default function SessionScreen() {
           restBufferRef.current = newBuf;
         });
 
-        restFlushTimerRef.current = setTimeout(async () => {
-          await flushRestBuffer();
-          if (restFlushTimerRef.current) {
-            restFlushTimerRef.current = setTimeout(flushRestBuffer, 3000);
-          }
-        }, 3000);
+        restFlushTimerRef.current = setTimeout(flushRestBuffer, 3000);
       }
 
       setIsRecording(true);
@@ -602,6 +610,10 @@ export default function SessionScreen() {
       restFlushTimerRef.current = null;
     }
     await flushRestBuffer();
+    if (restFlushTimerRef.current) {
+      clearTimeout(restFlushTimerRef.current);
+      restFlushTimerRef.current = null;
+    }
     restBufferRef.current = new Int16Array(0);
 
     if (streamingCaptureRef.current) {
