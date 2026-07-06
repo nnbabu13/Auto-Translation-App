@@ -23,8 +23,14 @@ import {
 import { QueueManager } from "@/lib/audio/queueManager";
 import { StreamingCapture, type AudioStats } from "@/lib/audio/streamingCapture";
 import { synthesizeLocal, hasLocalVoice, initPiper, downloadPiperVoice } from "@/lib/audio/piperTts";
+import { audioDeviceManager, type DeviceInfo, type DeviceHealthStatus, type DeviceHealthReport } from "@/lib/audio/deviceManager";
 
 type AudioInputDevice = {
+  deviceId: string;
+  label: string;
+};
+
+type AudioOutputDevice = {
   deviceId: string;
   label: string;
 };
@@ -75,6 +81,16 @@ export default function SessionScreen() {
   const [audioInputDevices, setAudioInputDevices] = useState<AudioInputDevice[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [activeDeviceName, setActiveDeviceName] = useState("No input selected");
+  const [audioOutputDevices, setAudioOutputDevices] = useState<AudioOutputDevice[]>([]);
+  const [selectedOutputDeviceId, setSelectedOutputDeviceId] = useState("");
+  const [activeOutputDeviceName, setActiveOutputDeviceName] = useState("System Default");
+  const [inputDeviceStatus, setInputDeviceStatus] = useState<DeviceHealthStatus>("ok");
+  const [outputDeviceStatus, setOutputDeviceStatus] = useState<DeviceHealthStatus>("ok");
+  const [showInputTest, setShowInputTest] = useState(false);
+  const [inputTestRms, setInputTestRms] = useState(0);
+  const [inputTestSpeechDetected, setInputTestSpeechDetected] = useState(false);
+  const [showOutputTest, setShowOutputTest] = useState(false);
+  const [outputTestStatus, setOutputTestStatus] = useState<"idle" | "testing" | "done" | "error">("idle");
   const [testMode, setTestMode] = useState(false);
   const [listeningActive, setListeningActive] = useState(false);
   const [processingCount, setProcessingCount] = useState(0);
@@ -153,6 +169,10 @@ export default function SessionScreen() {
 
   const restBufferRef = useRef<Int16Array>(new Int16Array(0));
   const restFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const testStreamRef = useRef<MediaStream | null>(null);
+  const testAnalyserRef = useRef<AnalyserNode | null>(null);
+  const testAnimFrameRef = useRef<number | null>(null);
+  const testAudioCtxRef = useRef<AudioContext | null>(null);
 
   const [currentPlaybackRate, setCurrentPlaybackRate] = useState(1.0);
   const [chunkCreationDelay, setChunkCreationDelay] = useState(0);
@@ -175,7 +195,7 @@ export default function SessionScreen() {
   useEffect(() => {
     isRecordingRef.current = isRecording;
     if (!queueManagerRef.current) {
-      queueManagerRef.current = new QueueManager();
+      queueManagerRef.current = new QueueManager(selectedOutputDeviceId);
     }
   }, [isRecording]);
 
@@ -203,36 +223,224 @@ export default function SessionScreen() {
   }, [session?.targetLanguage]);
 
   const loadAudioDevices = useCallback(async () => {
-    if (!navigator.mediaDevices?.enumerateDevices) {
-      return;
-    }
+    if (!navigator.mediaDevices?.enumerateDevices) return;
 
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const audioInputs = devices
-      .filter((device) => device.kind === "audioinput")
-      .map((device, index) => ({
-        deviceId: device.deviceId,
-        label: device.label || `Audio Input ${index + 1}`,
-      }));
+    await audioDeviceManager.enumerate();
 
-    setAudioInputDevices(audioInputs);
+    const inputs = audioDeviceManager.getInputDevices();
+    const outputs = audioDeviceManager.getOutputDevices();
 
-    const vacDevice = audioInputs.find(
+    setAudioInputDevices(
+      inputs.map((d, i) => ({
+        deviceId: d.deviceId,
+        label: d.label || `Audio Input ${i + 1}`,
+      })),
+    );
+    setAudioOutputDevices(
+      outputs.map((d, i) => ({
+        deviceId: d.deviceId,
+        label: d.label || `Audio Output ${i + 1}`,
+      })),
+    );
+
+    const persisted = audioDeviceManager.loadPersisted();
+
+    const vacDevice = inputs.find(
       (d) =>
         d.label.toLowerCase().includes("cable") ||
         d.label.toLowerCase().includes("virtual") ||
         d.label.toLowerCase().includes("stereo mix") ||
         d.label.toLowerCase().includes("line"),
     );
-    const preferredDevice = vacDevice?.deviceId || audioInputs[0]?.deviceId || "";
-    setSelectedDeviceId((current) => current || preferredDevice);
+    const preferredInput = persisted.inputId || vacDevice?.deviceId || inputs[0]?.deviceId || "";
+    setSelectedDeviceId((current) => current || preferredInput);
+
+    const preferredOutput =
+      persisted.outputId || outputs.find((d) => d.label.toLowerCase().includes("headphone"))?.deviceId || "";
+    setSelectedOutputDeviceId((current) => current || preferredOutput);
+    if (preferredOutput) {
+      const out = outputs.find((d) => d.deviceId === preferredOutput);
+      setActiveOutputDeviceName(out?.label || "System Default");
+    }
   }, []);
+
+  const testInputDevice = useCallback(async () => {
+    if (isRecording) return;
+    setShowInputTest(true);
+    setInputTestRms(0);
+    setInputTestSpeechDetected(false);
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId: selectedDeviceId ? { exact: selectedDeviceId } : undefined,
+          channelCount: 1,
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+      });
+      testStreamRef.current = stream;
+      audioDeviceManager.setPermissionGranted(true);
+
+      const audioCtx = new AudioContext({ sampleRate: 16000, latencyHint: "interactive" });
+      if (audioCtx.state === "suspended") {
+        await audioCtx.resume();
+      }
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      source.connect(analyser);
+      testAnalyserRef.current = analyser;
+      testAudioCtxRef.current = audioCtx;
+
+      const buffer = new Float32Array(analyser.frequencyBinCount);
+      const tick = () => {
+        if (!testAnalyserRef.current) return;
+        testAnalyserRef.current.getFloatTimeDomainData(buffer);
+        let sumSquares = 0;
+        for (let i = 0; i < buffer.length; i++) {
+          sumSquares += buffer[i] * buffer[i];
+        }
+        const rms = Math.sqrt(sumSquares / buffer.length);
+        setInputTestRms(rms);
+        setInputTestSpeechDetected(rms >= 0.015);
+        testAnimFrameRef.current = requestAnimationFrame(tick);
+      };
+      tick();
+    } catch (err) {
+      console.error("Input test failed:", err);
+      setShowInputTest(false);
+    }
+  }, [isRecording, selectedDeviceId]);
+
+  const closeInputTest = useCallback(() => {
+    setShowInputTest(false);
+    if (testAnimFrameRef.current) {
+      cancelAnimationFrame(testAnimFrameRef.current);
+      testAnimFrameRef.current = null;
+    }
+    if (testStreamRef.current) {
+      testStreamRef.current.getTracks().forEach((t) => t.stop());
+      testStreamRef.current = null;
+    }
+    if (testAudioCtxRef.current) {
+      testAudioCtxRef.current.close().catch(() => {});
+      testAudioCtxRef.current = null;
+    }
+    testAnalyserRef.current = null;
+  }, []);
+
+  const testOutputDevice = useCallback(async () => {
+    if (showOutputTest) return;
+    setShowOutputTest(true);
+    setOutputTestStatus("testing");
+
+    try {
+      const ctx = new AudioContext();
+      if (ctx.state === "suspended") await ctx.resume();
+
+      if (selectedOutputDeviceId && typeof (ctx as any).setSinkId === "function") {
+        try {
+          await (ctx as any).setSinkId(selectedOutputDeviceId);
+        } catch (err) {
+          console.warn("Output test setSinkId failed:", err);
+        }
+      }
+
+      const sampleRate = ctx.sampleRate;
+      const duration = 1.5;
+      const freq = 440;
+      const length = sampleRate * duration;
+      const buffer = ctx.createBuffer(1, length, sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < length; i++) {
+        const t = i / sampleRate;
+        data[i] = Math.sin(2 * Math.PI * freq * t) * 0.3 * (1 - t / duration);
+      }
+
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(ctx.destination);
+      await new Promise<void>((resolve) => {
+        source.onended = () => resolve();
+        source.start(0);
+      });
+
+      await ctx.close();
+      setOutputTestStatus("done");
+      setTimeout(() => {
+        setShowOutputTest(false);
+        setOutputTestStatus("idle");
+      }, 1500);
+    } catch (err) {
+      console.error("Output test failed:", err);
+      setOutputTestStatus("error");
+      setTimeout(() => {
+        setShowOutputTest(false);
+        setOutputTestStatus("idle");
+      }, 2000);
+    }
+  }, [selectedOutputDeviceId, showOutputTest]);
 
   useEffect(() => {
     loadAudioDevices().catch((error) => {
       console.error("Failed to enumerate audio devices:", error);
     });
   }, [loadAudioDevices]);
+
+  useEffect(() => {
+    const handleDeviceChange = (inputs: DeviceInfo[], outputs: DeviceInfo[]) => {
+      setAudioInputDevices(
+        inputs.map((d, i) => ({ deviceId: d.deviceId, label: d.label || `Audio Input ${i + 1}` })),
+      );
+      setAudioOutputDevices(
+        outputs.map((d, i) => ({ deviceId: d.deviceId, label: d.label || `Audio Output ${i + 1}` })),
+      );
+
+      setInputDeviceStatus(audioDeviceManager.getInputHealth(selectedDeviceId));
+      setOutputDeviceStatus(audioDeviceManager.getOutputHealth(selectedOutputDeviceId));
+    };
+
+    const handleHealthChange = (reports: DeviceHealthReport[]) => {
+      for (const report of reports) {
+        if (report.deviceId === selectedDeviceId) {
+          setInputDeviceStatus(report.status);
+        }
+        if (report.deviceId === selectedOutputDeviceId) {
+          setOutputDeviceStatus(report.status);
+        }
+      }
+    };
+
+    audioDeviceManager.startListening();
+    audioDeviceManager.onDeviceChange(handleDeviceChange);
+    audioDeviceManager.onHealthChange(handleHealthChange);
+
+    return () => {
+      audioDeviceManager.stopListening();
+      audioDeviceManager.removeDeviceChangeListener(handleDeviceChange);
+      audioDeviceManager.removeHealthChangeListener(handleHealthChange);
+    };
+  }, [selectedDeviceId, selectedOutputDeviceId]);
+
+  useEffect(() => {
+    audioDeviceManager.persistInput(selectedDeviceId);
+    const input = audioDeviceManager.getInputDevices().find((d) => d.deviceId === selectedDeviceId);
+    if (input) setInputDeviceStatus("ok");
+  }, [selectedDeviceId]);
+
+  useEffect(() => {
+    audioDeviceManager.persistOutput(selectedOutputDeviceId);
+    const output = audioDeviceManager.getOutputDevices().find((d) => d.deviceId === selectedOutputDeviceId);
+    if (output) {
+      setActiveOutputDeviceName(output.label);
+      setOutputDeviceStatus("ok");
+    }
+    if (queueManagerRef.current) {
+      queueManagerRef.current.setSinkId(selectedOutputDeviceId).catch(console.error);
+    }
+  }, [selectedOutputDeviceId]);
 
   useEffect(() => {
     const canvas = waveformCanvasRef.current;
@@ -493,6 +701,7 @@ export default function SessionScreen() {
           autoGainControl: false,
         },
       });
+      audioDeviceManager.setPermissionGranted(true);
 
       const activeTrack = stream.getAudioTracks()[0];
       setActiveDeviceName(
@@ -777,8 +986,66 @@ export default function SessionScreen() {
                   </p>
                 </div>
                 <div>
-                  <p className="text-sm text-muted-foreground">Active Device</p>
-                  <p className="text-sm text-white">{activeDeviceName}</p>
+                  <p className="text-sm text-muted-foreground">Active Input Device</p>
+                  <p className="text-sm text-white">
+                    {activeDeviceName}
+                    {inputDeviceStatus !== "ok" && (
+                      <span className="ml-2 text-xs text-red-500">
+                        ({inputDeviceStatus === "disconnected" ? "Disconnected" : inputDeviceStatus === "changed" ? "Changed" : inputDeviceStatus === "perm-revoked" ? "Permission Revoked" : ""})
+                      </span>
+                    )}
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-sm text-muted-foreground mb-2">
+                    Audio Output Device
+                  </label>
+                  <select
+                    className="w-full bg-background border border-border rounded-md px-3 py-2 text-white"
+                    value={selectedOutputDeviceId}
+                    onChange={(e) => setSelectedOutputDeviceId(e.target.value)}
+                  >
+                    <option value="">System Default</option>
+                    {audioOutputDevices.map((device) => (
+                      <option key={device.deviceId} value={device.deviceId}>
+                        {device.label}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Routes translated audio to the selected output.
+                    {outputDeviceStatus !== "ok" && (
+                      <span className="ml-1 text-red-500">
+                        ({outputDeviceStatus === "disconnected" ? "Disconnected" : outputDeviceStatus === "changed" ? "Changed" : outputDeviceStatus === "perm-revoked" ? "Permission Revoked" : ""})
+                      </span>
+                    )}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-sm text-muted-foreground">Active Output Device</p>
+                  <p className="text-sm text-white">{activeOutputDeviceName}</p>
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="flex-1"
+                    onClick={testInputDevice}
+                    disabled={isRecording}
+                  >
+                    Test Input
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="flex-1"
+                    onClick={testOutputDevice}
+                    disabled={showOutputTest}
+                  >
+                    {showOutputTest && outputTestStatus === "testing"
+                      ? "Testing..."
+                      : "Test Output"}
+                  </Button>
                 </div>
                 <div className="flex items-center justify-between">
                   <label className="text-sm text-muted-foreground">
@@ -1303,6 +1570,47 @@ export default function SessionScreen() {
               <p className="text-xs text-muted-foreground">Final → displayed</p>
             </div>
           </div>
+        </div>
+      )}
+
+      {showInputTest && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
+          <Card className="bg-card border-card-border max-w-md w-full mx-4">
+            <CardHeader className="flex flex-row items-center justify-between">
+              <CardTitle className="text-lg font-bold text-white">Input Test</CardTitle>
+              <Button variant="outline" onClick={closeInputTest}>Close</Button>
+            </CardHeader>
+            <CardContent className="p-6 space-y-4">
+              <div>
+                <div className="flex justify-between mb-1">
+                  <span className="text-sm text-muted-foreground">RMS Level</span>
+                  <span className="text-sm text-white font-mono">{inputTestRms.toFixed(4)}</span>
+                </div>
+                <div className="w-full bg-gray-700 rounded-full h-3">
+                  <div
+                    className="h-3 rounded-full transition-all"
+                    style={{
+                      width: `${Math.min(100, inputTestRms * 1000)}%`,
+                      backgroundColor: inputTestRms >= 0.03 ? "#22c55e" : inputTestRms >= 0.015 ? "#eab308" : "#ef4444",
+                    }}
+                  />
+                </div>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Speech Detected</span>
+                <span className={inputTestSpeechDetected ? "text-green-500" : "text-red-500"}>
+                  {inputTestSpeechDetected ? "Yes" : "No"}
+                </span>
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {inputTestRms < 0.005
+                  ? "No audible input detected. Check your device connection."
+                  : inputTestRms < 0.015
+                  ? "Signal detected but very low. Consider increasing input volume."
+                  : "Good input level."}
+              </div>
+            </CardContent>
+          </Card>
         </div>
       )}
 

@@ -29,8 +29,29 @@ export class QueueManager {
   private isProcessingPlayback = false;
   private chunkCounter = 0;
   private playbackRate = 1.0;
+  private sinkId = "";
+  private appliedSinkId = "";
 
-  constructor() {}
+  constructor(sinkId?: string) {
+    if (sinkId) this.sinkId = sinkId;
+  }
+
+  async setSinkId(sinkId: string): Promise<void> {
+    this.sinkId = sinkId;
+    await this.applySinkId();
+  }
+
+  private async applySinkId(): Promise<void> {
+    if (!this.sinkId || this.sinkId === this.appliedSinkId) return;
+    if (!window.audioContext) return;
+    if (typeof (window.audioContext as any).setSinkId !== "function") return;
+    try {
+      await (window.audioContext as any).setSinkId(this.sinkId);
+      this.appliedSinkId = this.sinkId;
+    } catch (err) {
+      console.warn("Could not set audio output device:", err);
+    }
+  }
 
   addToCaptureQueue(data: ChunkData) {
     this.captureQueue.push(data);
@@ -113,6 +134,7 @@ export class QueueManager {
         window.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
       }
       const ctx = window.audioContext;
+      await this.applySinkId();
 
       const int16Array = new Int16Array(arrayBuffer);
       const float32Array = new Float32Array(int16Array.length);
