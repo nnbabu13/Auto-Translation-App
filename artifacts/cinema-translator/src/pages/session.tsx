@@ -539,7 +539,7 @@ export default function SessionScreen() {
       };
     });
 
-    const shouldUseLocalTTS = ttsEnabled && ttsProvider === "local" && session && hasLocalVoice(session.targetLanguage);
+    const shouldUseLocalTTS = ttsEnabled && ttsProvider === "local" && piperReady && session && hasLocalVoice(session.targetLanguage);
     const audioForPlayback = audioBase64 || "";
 
     if ((audioForPlayback || shouldUseLocalTTS) && queueManagerRef.current) {
@@ -574,9 +574,22 @@ export default function SessionScreen() {
               setEstimatedWaitMs(queueManagerRef.current!.getEstimatedWaitMs());
             };
             reader.readAsDataURL(wavBlob);
+          } else {
+            setTtsProvider("cloud");
+            toast({
+              title: "Local TTS unavailable",
+              description:
+                "Piper WASM could not synthesize audio in your browser. Switched to Cloud (OpenAI) TTS. Translated audio will use cloud-based speech synthesis going forward.",
+            });
           }
           setSpeakingActive(false);
         }).catch(() => {
+          setTtsProvider("cloud");
+          toast({
+            title: "Local TTS error",
+            description:
+              "Switched to Cloud (OpenAI) TTS due to a Piper synthesis error.",
+          });
           setSpeakingActive(false);
         });
       } else if (audioForPlayback) {
@@ -594,7 +607,7 @@ export default function SessionScreen() {
     }
 
     setProcessingCount(0);
-  }, [ttsProvider, ttsEnabled, session?.targetLanguage, session]);
+  }, [ttsProvider, ttsEnabled, piperReady, session?.targetLanguage, session]);
 
   const flushRestBuffer = useCallback(async () => {
     const buf = restBufferRef.current;
@@ -650,7 +663,7 @@ export default function SessionScreen() {
           cinemaMode,
           diarize: diarizationEnabled,
           compressionMode: useCompression,
-          skipTTS: !ttsEnabled || ttsProvider === "local",
+          skipTTS: !ttsEnabled || (ttsProvider === "local" && piperReady && hasLocalVoice(session.targetLanguage)),
         }),
       });
 
@@ -682,7 +695,7 @@ export default function SessionScreen() {
       console.error("REST flush error:", err);
     }
     restFlushTimerRef.current = setTimeout(flushRestBuffer, 3000);
-  }, [session, sourceLanguageSetting, currentModel, sttModel, cinemaMode, diarizationEnabled, translationHistory.length, ttsEnabled, ttsProvider]);
+  }, [session, sourceLanguageSetting, currentModel, sttModel, cinemaMode, diarizationEnabled, translationHistory.length, ttsEnabled, ttsProvider, piperReady]);
 
   const startRecording = async () => {
     if (!session || isRecording) return;
