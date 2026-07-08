@@ -1,5 +1,9 @@
 import * as tts from "@mintplex-labs/piper-tts-web";
 
+const ONNX_VERSION = "1.27.0";
+const ONNX_CDN = `https://unpkg.com/onnxruntime-web@${ONNX_VERSION}/dist/`;
+const WASM_BASE = "https://cdn.jsdelivr.net/npm/@diffusionstudio/piper-wasm@1.0.0/build/piper_phonemize";
+
 const LANGUAGE_VOICE_MAP: Record<string, string> = {
   English: "en_US-lessac-medium",
   Greek: "el_GR-rapunzelina-low",
@@ -61,10 +65,12 @@ export async function synthesizeLocal(
   }
 
   try {
-    const wavBlob = await tts.predict({
-      text,
+    const session = new tts.TtsSession({
       voiceId,
+      wasmPaths: { onnxWasm: ONNX_CDN, piperData: `${WASM_BASE}.data`, piperWasm: `${WASM_BASE}.wasm` },
     });
+    await session.waitReady;
+    const wavBlob = await session.predict(text);
     return wavBlob;
   } catch (err) {
     console.error(`Piper TTS synthesis error for ${language}:`, err);
